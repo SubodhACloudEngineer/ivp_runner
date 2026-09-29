@@ -1,0 +1,22 @@
+# Local-only material: reference workbook, run output, captured API samples
+reference/
+out/
+samples/
+
+# Secrets
+.env
+
+# Workbooks: only test fixtures are tracked
+*.xlsx
+!tests/fixtures/**/*.xlsx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
