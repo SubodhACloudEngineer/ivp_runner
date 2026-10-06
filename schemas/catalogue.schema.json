@@ -1,0 +1,430 @@
+{
+  "$defs": {
+    "Assertion": {
+      "additionalProperties": false,
+      "properties": {
+        "at_least": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectRef"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At Least"
+        },
+        "equals": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectRef"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Equals"
+        },
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "in_subnet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectRef"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "In Subnet"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "present": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Present"
+        },
+        "reset_guard": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reset Guard"
+        },
+        "same_set_as": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectRef"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Same Set As"
+        },
+        "unchanged_during_run": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unchanged During Run"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "Assertion",
+      "type": "object"
+    },
+    "Check": {
+      "additionalProperties": false,
+      "properties": {
+        "collect": {
+          "$ref": "#/$defs/Collect"
+        },
+        "coverage": {
+          "enum": [
+            "full",
+            "partial"
+          ],
+          "title": "Coverage",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "limitation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limitation"
+        },
+        "mop": {
+          "$ref": "#/$defs/MopRef"
+        },
+        "pass_when": {
+          "$ref": "#/$defs/Criterion"
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "site_classes": {
+          "items": {
+            "enum": [
+              "all",
+              "small",
+              "medium",
+              "large"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Site Classes",
+          "type": "array"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "test_id": {
+          "pattern": "^[A-Z]{2,}-\\d{2}$",
+          "title": "Test Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "vars": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExpectRef"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Vars",
+          "type": "object"
+        }
+      },
+      "required": [
+        "test_id",
+        "title",
+        "mop",
+        "site_classes",
+        "coverage",
+        "collect",
+        "target",
+        "pass_when"
+      ],
+      "title": "Check",
+      "type": "object"
+    },
+    "Collect": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "enum": [
+            "mist_api",
+            "ssh",
+            "probe"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "sampling": {
+          "default": "once",
+          "enum": [
+            "once",
+            "run_start_and_end"
+          ],
+          "title": "Sampling",
+          "type": "string"
+        },
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "source"
+      ],
+      "title": "Collect",
+      "type": "object"
+    },
+    "Criterion": {
+      "additionalProperties": false,
+      "properties": {
+        "all": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Assertion"
+              },
+              {
+                "$ref": "#/$defs/ForEach"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "All",
+          "type": "array"
+        }
+      },
+      "required": [
+        "all"
+      ],
+      "title": "Criterion",
+      "type": "object"
+    },
+    "ExpectRef": {
+      "additionalProperties": false,
+      "description": "A reference to a site-profile value, e.g. ``{expect: dns_servers}``.",
+      "properties": {
+        "expect": {
+          "minLength": 1,
+          "title": "Expect",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expect"
+      ],
+      "title": "ExpectRef",
+      "type": "object"
+    },
+    "ForEach": {
+      "additionalProperties": false,
+      "description": "Repeat ``all`` for every key under ``for_each``; the last ``<var>`` names the key.",
+      "properties": {
+        "all": {
+          "items": {
+            "$ref": "#/$defs/Assertion"
+          },
+          "minItems": 1,
+          "title": "All",
+          "type": "array"
+        },
+        "for_each": {
+          "pattern": "^[\\w.<>]+\\.<[a-z_]+>$",
+          "title": "For Each",
+          "type": "string"
+        },
+        "min_evaluated": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Min Evaluated",
+          "type": "integer"
+        },
+        "skip_if": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Assertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "for_each",
+        "all"
+      ],
+      "title": "ForEach",
+      "type": "object"
+    },
+    "MopRef": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "section": {
+          "minLength": 1,
+          "title": "Section",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "description"
+      ],
+      "title": "MopRef",
+      "type": "object"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ap",
+          "title": "Kind",
+          "type": "string"
+        },
+        "select": {
+          "$ref": "#/$defs/Assertion"
+        }
+      },
+      "required": [
+        "kind",
+        "select"
+      ],
+      "title": "Target",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/Check"
+      },
+      "minItems": 1,
+      "title": "Checks",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "checks"
+  ],
+  "title": "Catalogue",
+  "type": "object"
+}

@@ -1,0 +1,18 @@
+# Example site profile. Real profiles live next to this file and are gitignored.
+#
+# Every value is DESIGN INTENT from the LLD/MOP, never copied from Mist site
+# settings. A missing value makes the checks that need it report ERROR
+# (expectation_missing); they are never silently passed.
+# Addresses below are documentation ranges (RFC 5737).
+
+schema_version: 1
+site_id: 00000000-0000-0000-0000-000000000000
+site_class: large
+expectations:
+  uplink_port: eth0
+  ssids:
+    - {ssid: Example Corporate, bands: ["5", "6"]}
+    - {ssid: Example Guest, bands: ["24", "5"]}
+  mgmt_subnet: 192.0.2.0/24
+  dns_servers: [192.0.2.53, 198.51.100.53]
+  min_uplink_speed_mbps: 1000

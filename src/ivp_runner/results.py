@@ -1,160 +1,144 @@
-"""Result schema: per-device verdicts, per-check rollups, and the run envelope.
+"""Result contract: one record per executed (test, device).
 
 Every timestamp is stored in UTC, with the site-local rendering alongside it.
-Evidence keys are literal field paths from the Mist response, using the actual
-port and band keys (e.g. ``port_stat.eth0.rx_errors``), so each value traces
-back to the API.
+``expected`` and ``actual`` are keyed by literal field path, so each value
+traces back to the raw payload that ``raw_ref`` points at.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from enum import Enum, StrEnum
-from typing import Any
+from enum import StrEnum
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 RESULT_SCHEMA_VERSION = 1
+Method = Literal["mist_api", "ssh", "probe"]
 
 
 class Verdict(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
-    # Not evaluated because a precondition check failed for this device.
+    # Not evaluated because a precondition check did not pass for this device.
     SKIP = "SKIP"
-    # Evaluated, but the data cannot support a verdict (e.g. a counter reset).
-    INCONCLUSIVE = "INCONCLUSIVE"
-    # The runner could not evaluate: missing expectation, API error, bad data.
+    # The check could not be executed or its data cannot support a verdict.
+    # Never a disguised FAIL.
     ERROR = "ERROR"
 
 
 class Reason(StrEnum):
-    """Machine-readable cause for any verdict other than PASS."""
+    """Machine-readable cause, required for every verdict except PASS."""
 
     CRITERIA_NOT_MET = "criteria_not_met"  # FAIL
     PRECONDITION_FAILED = "precondition_failed"  # SKIP
-    COUNTER_RESET = "counter_reset"  # INCONCLUSIVE: AP rebooted mid-run
-    END_SAMPLE_MISSING = "end_sample_missing"  # INCONCLUSIVE
-    EXPECTATION_MISSING = "expectation_missing"  # ERROR: catalogue value is null
-    FIELD_MISSING = "field_missing"  # ERROR: required field absent
-    API_ERROR = "api_error"  # ERROR
+    COUNTER_RESET = "counter_reset"  # ERROR: device rebooted mid-run
+    SAMPLE_MISSING = "sample_missing"  # ERROR: device absent from run-end sample
+    FIELD_MISSING = "field_missing"  # ERROR: required field not reported
+    EXPECTATION_MISSING = "expectation_missing"  # ERROR: site profile lacks a value
+    BAD_DATA = "bad_data"  # ERROR: field has an unexpected type/format
+    METHOD_UNAVAILABLE = "method_unavailable"  # ERROR: backend not implemented
+    API_ERROR = "api_error"  # ERROR: collection failed
 
 
-# Rollup precedence, highest first. A confirmed FAIL outranks an ERROR elsewhere,
-# because it is the most actionable outcome. SKIP only wins if every device skipped.
-_ROLLUP_ORDER = (
-    Verdict.FAIL,
-    Verdict.ERROR,
-    Verdict.INCONCLUSIVE,
-    Verdict.PASS,
-    Verdict.SKIP,
-)
+_REASONS_BY_VERDICT = {
+    Verdict.FAIL: {Reason.CRITERIA_NOT_MET},
+    Verdict.SKIP: {Reason.PRECONDITION_FAILED},
+    Verdict.ERROR: set(Reason) - {Reason.CRITERIA_NOT_MET, Reason.PRECONDITION_FAILED},
+}
+
+# Rollup precedence, highest first. A confirmed FAIL is the most actionable
+# outcome; SKIP only wins if nothing else happened.
+ROLLUP_ORDER = (Verdict.FAIL, Verdict.ERROR, Verdict.PASS, Verdict.SKIP)
 
 
-@dataclass(frozen=True)
-class Timestamp:
-    utc: str  # ISO 8601, "Z" suffix
-    local: str  # ISO 8601 with site offset
-    tz: str  # IANA zone used for `local`
-
-    @classmethod
-    def from_datetime(cls, dt: datetime, tz: str) -> Timestamp:
-        if dt.tzinfo is None:
-            raise ValueError("naive datetime: timestamps must be timezone-aware")
-        utc = dt.astimezone(UTC)
-        return cls(
-            utc=utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            local=utc.astimezone(ZoneInfo(tz)).isoformat(timespec="seconds"),
-            tz=tz,
-        )
-
-    @classmethod
-    def from_epoch(cls, seconds: float, tz: str) -> Timestamp:
-        return cls.from_datetime(datetime.fromtimestamp(seconds, UTC), tz)
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-@dataclass(frozen=True)
-class DeviceRef:
+class SiteRef(_Strict):
     id: str
     name: str
-    mac: str
-    model: str
+    site_class: Literal["small", "medium", "large"] = Field(alias="class")
 
 
-@dataclass(frozen=True)
-class AssertionResult:
-    name: str
-    verdict: Verdict
+class DeviceRef(_Strict):
+    id: str
+    name: str | None = None
+    mac: str | None = None
+    model: str | None = None
+
+
+class RawRef(_Strict):
+    """Where the device's raw data lives: a saved payload file plus a JSON pointer into it."""
+
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    pointer: str = Field(pattern=r"^(/[^/]*)*$")  # RFC 6901
+    sample: Literal["once", "start", "end"] = "once"
+
+
+class AssertionResult(_Strict):
+    field: str
+    rule: str  # the describe() sentence the reviewer approved
     expected: Any = None
-    observed: Any = None
+    actual: Any = None
+    verdict: Literal[Verdict.PASS, Verdict.FAIL, Verdict.ERROR]
+    reason: Reason | None = None
+    message: str = ""
 
 
-@dataclass(frozen=True)
-class DeviceResult:
-    device: DeviceRef
+class TestResult(_Strict):
+    __test__ = False  # not a pytest test class
+
+    schema_version: Literal[1] = RESULT_SCHEMA_VERSION
+    run_id: str
+    test_id: str = Field(pattern=r"^[A-Z]{2,}-\d{2}$")
+    site: SiteRef
+    # Null only for an ERROR that applies to the whole site (e.g. the API call failed).
+    device: DeviceRef | None
+    timestamp_utc: str = Field(pattern=r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+    timestamp_local: str
+    timezone: str
+    method: Method
+    expected: dict[str, Any] = Field(default_factory=dict)
+    actual: dict[str, Any] = Field(default_factory=dict)
     verdict: Verdict
     reason: Reason | None = None
     message: str = ""
-    evidence: dict[str, Any] = field(default_factory=dict)
-    assertions: tuple[AssertionResult, ...] = ()
+    assertions: list[AssertionResult] = Field(default_factory=list)
+    evidence_path: str | None = None
+    raw_ref: list[RawRef] = Field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        if self.verdict is Verdict.PASS and self.reason is not None:
-            raise ValueError("PASS carries no reason")
-        if self.verdict is not Verdict.PASS and self.reason is None:
-            raise ValueError(f"{self.verdict.value} requires a reason")
-
-
-@dataclass(frozen=True)
-class CheckResult:
-    test_id: str
-    title: str
-    coverage: str
-    limitation: str | None
-    devices: tuple[DeviceResult, ...]
-    verdict: Verdict = field(init=False)
-    counts: dict[str, int] = field(init=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "verdict", rollup(d.verdict for d in self.devices))
-        counts = {v.value: 0 for v in Verdict}
-        for d in self.devices:
-            counts[d.verdict.value] += 1
-        object.__setattr__(self, "counts", counts)
+    @model_validator(mode="after")
+    def _consistent(self) -> TestResult:
+        if self.verdict is Verdict.PASS:
+            if self.reason is not None:
+                raise ValueError("PASS carries no reason")
+        elif self.reason not in _REASONS_BY_VERDICT[self.verdict]:
+            allowed = sorted(r.value for r in _REASONS_BY_VERDICT[self.verdict])
+            raise ValueError(f"{self.verdict.value} requires a reason from {allowed}")
+        if self.device is None and self.verdict is not Verdict.ERROR:
+            raise ValueError("device may only be null for a site-wide ERROR")
+        return self
 
 
-@dataclass(frozen=True)
-class SiteRef:
-    id: str
-    name: str
-    timezone: str
+def timestamps(dt: datetime, tz: str) -> tuple[str, str]:
+    """(UTC ISO with Z, site-local ISO with offset) for an aware datetime."""
+    if dt.tzinfo is None:
+        raise ValueError("naive datetime: timestamps must be timezone-aware")
+    utc = dt.astimezone(UTC)
+    return (
+        utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        utc.astimezone(ZoneInfo(tz)).isoformat(timespec="seconds"),
+    )
 
 
-@dataclass(frozen=True)
-class RunResult:
-    run_id: str
-    tool_version: str
-    org_id: str
-    api_host: str
-    site: SiteRef
-    catalogue_path: str
-    catalogue_sha256: str
-    started_at: Timestamp
-    finished_at: Timestamp
-    checks: tuple[CheckResult, ...]
-    schema_version: int = RESULT_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self, dict_factory=_json_dict)
-
-
-def rollup(verdicts) -> Verdict:
-    """Collapse device verdicts into one check verdict. An empty input gives ERROR."""
+def rollup(verdicts: Iterable[Verdict]) -> Verdict:
+    """Collapse several verdicts into one. An empty input gives ERROR."""
     seen = set(verdicts)
     if not seen:
         return Verdict.ERROR
-    return next(v for v in _ROLLUP_ORDER if v in seen)
-
-
-def _json_dict(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    return {k: (v.value if isinstance(v, Enum) else v) for k, v in items}
+    return next(v for v in ROLLUP_ORDER if v in seen)

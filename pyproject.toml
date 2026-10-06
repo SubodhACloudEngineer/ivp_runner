@@ -12,6 +12,7 @@ dependencies = [
     "requests",
     "pyyaml",
     "openpyxl",
+    "pydantic>=2",
     "tzdata; sys_platform == 'win32'",
 ]
 

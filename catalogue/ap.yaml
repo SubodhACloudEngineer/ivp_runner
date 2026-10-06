@@ -1,136 +1,148 @@
 # IVP check catalogue: access points.
 #
-# Each check has a stable test ID that never changes, even if its title does.
-# Every path in `fields` must appear in docs/field_inventory.md. Paths are
-# relative to one AP item of the stats response. `<port>` is replaced by
-# `uplink_port`, and `<band>` by each band key.
+# One entry per check. Each test_id is stable and never changes, even if the
+# title does. `mop.description` is copied verbatim from the MOP's
+# "IVP Test Plan" sheet.
 #
-# Expected values below come from DESIGN INTENT (LLD / MOP), never from Mist
-# site settings, which only describe current state. A `null` expectation
-# makes the checks that use it return ERROR (expectation_missing). They are
-# never silently skipped or passed.
+# `pass_when` is the reviewed contract. Each line is one assertion on one
+# field, and every field path must exist in docs/field_inventory.md.
+# `{expect: name}` refers to the site profile (sites/<site>.yaml), which
+# holds design intent. Placeholders like <port> come from `vars`, or from the
+# `for_each` key.
+#
+# Review the rendered sentences with:
+#   python -m ivp_runner.catalogue explain catalogue/ap.yaml
 
-schema_version: 1
-
-source:
-  endpoint: /api/v1/sites/{site_id}/stats/devices
-  params: {type: ap}
-
-expectations:
-  # SSIDs the site is designed to broadcast. AP-01 turns this into an expected
-  # SSID count per band.
-  # Each entry looks like: {ssid: "Name", bands: ["24", "5"]}
-  ssids: null
-  # AP management subnet in CIDR form, e.g. "192.0.2.0/24".
-  mgmt_subnet: null
-  # DNS resolvers APs should be configured with, compared as an unordered set.
-  dns_servers: null
-  # Minimum uplink speed in Mbps.
-  min_uplink_speed_mbps: null
-
-uplink_port: eth0
+schema_version: 2
 
 checks:
-  - id: AP-00
+  - test_id: AP-00
     title: AP is connected and reporting runtime data
+    mop:
+      section: Verify AP
+      description: Go to Access-points and select the corresponding site
+    site_classes: [all]
     coverage: full
-    precondition_for: [AP-01, AP-02, AP-03, AP-04, AP-05]
-    fields:
-      - status
-      - radio_stat
-      - power_constrained
-      - ip_stat.ip
-      - ip_stat.netmask
-      - ip_stat.dns
-      - port_stat.<port>.up
-      - port_stat.<port>.rx_errors
-      - uptime
-    pass_criteria: >
-      status == "connected" AND every other listed field is present. When this
-      check fails for an AP, every check it is a precondition for reports SKIP
-      for that AP, with reason precondition_failed.
+    vars: {port: {expect: uplink_port}}
+    collect: {method: mist_api, source: site_device_stats}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - {field: status, equals: connected}
+        - {field: radio_stat, present: true}
+        - {field: power_constrained, present: true}
+        - {field: ip_stat.ip, present: true}
+        - {field: ip_stat.netmask, present: true}
+        - {field: ip_stat.dns, present: true}
+        - {field: port_stat.<port>.up, present: true}
+        - {field: port_stat.<port>.rx_errors, present: true}
+        - {field: uptime, present: true}
+    evidence: [status, last_seen, uptime]
 
-  - id: AP-01
+  - test_id: AP-01
     title: Expected number of SSIDs broadcast on each enabled band
+    mop:
+      section: Verify AP
+      description: Check the WLANs box to confirm the SSIDs that are being broadcasted
+    site_classes: [all]
     coverage: partial
     limitation: >
-      The Mist AP stats give a per-band SSID count, not SSID names. A count
-      catches an AP broadcasting nothing or too few, but it cannot tell a
-      missing SSID from a swapped one, and it cannot confirm names. Name
-      matching needs a client-side probe that has not been built.
-    fields:
-      - radio_stat.<band>.num_wlans
-      - radio_stat.<band>.disabled
-    uses_expectations: [ssids]
-    pass_criteria: >
-      For every band key in radio_stat that is not disabled: num_wlans equals
-      the number of expected SSIDs that list that band. A disabled band, or a
-      band the AP model doesn't have, is recorded in evidence and not counted.
-      If all bands are disabled, the result is FAIL.
+      Mist AP stats report how many SSIDs each band broadcasts, not their names.
+      A count catches an AP broadcasting nothing or too few, but it cannot tell
+      a missing SSID from a swapped one. Matching SSID names needs a
+      client-side probe that has not been built.
+    requires: [AP-00]
+    collect: {method: mist_api, source: site_device_stats}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - for_each: radio_stat.<band>
+          skip_if: {field: disabled, equals: true}
+          all:
+            - {field: num_wlans, equals: {expect: ssid_count.<band>}}
+          min_evaluated: 1
+    evidence: [num_wlans]
 
-  - id: AP-02
+  - test_id: AP-02
     title: AP is not power-constrained (full PoE power)
+    mop:
+      section: Verify AP
+      description: "Check the Power mode:"
+    site_classes: [all]
     coverage: full
-    fields:
-      - power_constrained
-      - power_src
-      - power_needed
-      - power_avail
-    pass_criteria: >
-      power_constrained == false. power_src, power_needed and power_avail are
-      recorded as evidence only. power_opmode is not used because its meaning
-      is unknown.
+    requires: [AP-00]
+    collect: {method: mist_api, source: site_device_stats}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - {field: power_constrained, equals: false}
+    # power_opmode is deliberately unused: its meaning is unknown.
+    evidence: [power_src, power_needed, power_avail, power_budget]
 
-  - id: AP-03
+  - test_id: AP-03
     title: Management IP within expected subnet; DNS servers match expected configuration
+    mop:
+      section: Verify AP
+      description: >-
+        Check the status to confirm the proper configuration is in place,
+        Ip address, vlan, DNS and external IP address:
+    site_classes: [all]
     coverage: partial
     limitation: >
-      This checks the subnet, not the VLAN, because the AP does not report a
-      VLAN ID. It also checks which DNS servers are configured, not whether DNS
-      resolves: "DNS servers match expected configuration" is NOT proof that
-      DNS works. A real DNS-resolution check needs a client probe that has not
-      been built.
-    fields:
-      - ip_stat.ip
-      - ip_stat.netmask
-      - ip_stat.dns
-    uses_expectations: [mgmt_subnet, dns_servers]
-    assertions:
-      - name: mgmt_ip_in_expected_subnet
-        pass_criteria: ip_stat.ip is inside expectations.mgmt_subnet
-      - name: dns_servers_match_expected_configuration
-        pass_criteria: set(ip_stat.dns) == set(expectations.dns_servers)
-    pass_criteria: Both assertions pass.
+      This checks the subnet, not the VLAN: the AP does not report a VLAN ID.
+      It checks which DNS servers are configured, not whether DNS resolves, so
+      "DNS servers match expected configuration" is not proof that DNS works.
+      A real DNS-resolution check needs a client probe that has not been built.
+    requires: [AP-00]
+    collect: {method: mist_api, source: site_device_stats}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - name: mgmt_ip_in_expected_subnet
+          field: ip_stat.ip
+          in_subnet: {expect: mgmt_subnet}
+        - name: dns_servers_match_expected_configuration
+          field: ip_stat.dns
+          same_set_as: {expect: dns_servers}
+    evidence: [ip_stat.ip, ip_stat.netmask, ip_stat.gateway, ip_stat.dns]
 
-  - id: AP-04
+  - test_id: AP-04
     title: Uplink port up, at or above the expected speed, full duplex
+    mop:
+      section: Verify AP
+      description: Make sure the Ethernet properties are correct, Full duplex and no errors are shown.
+    site_classes: [all]
     coverage: full
-    fields:
-      - port_stat.<port>.up
-      - port_stat.<port>.speed
-      - port_stat.<port>.full_duplex
-      - lldp_stat.ap_port_name
-    uses_expectations: [min_uplink_speed_mbps]
-    pass_criteria: >
-      up == true AND speed >= min_uplink_speed_mbps AND full_duplex == true on
-      uplink_port. lldp_stat.ap_port_name is recorded as evidence only.
+    requires: [AP-00]
+    vars: {port: {expect: uplink_port}}
+    collect: {method: mist_api, source: site_device_stats}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - {field: port_stat.<port>.up, equals: true}
+        - {field: port_stat.<port>.speed, at_least: {expect: min_uplink_speed_mbps}}
+        - {field: port_stat.<port>.full_duplex, equals: true}
+    evidence: [lldp_stat.ap_port_name, lldp_stat.system_name, lldp_stat.port_id]
 
-  - id: AP-05
+  - test_id: AP-05
     title: No new RX errors on the uplink port during the run
+    mop:
+      section: Verify AP
+      description: Make sure the Ethernet properties are correct, Full duplex and no errors are shown.
+    site_classes: [all]
     coverage: partial
     limitation: >
       Mist exposes no TX error counter for AP ports, so only RX is checked.
-      rx_errors is a lifetime counter, so the check uses the change between a
-      reading taken at run start and one taken at run end. The window is the
-      run duration and there is no added wait. The absolute counter value is
-      carried in evidence as context.
-    sampling: run_start_and_end
-    fields:
-      - port_stat.<port>.rx_errors
-      - uptime
-    pass_criteria: >
-      delta = rx_errors(end) - rx_errors(start). PASS if delta == 0, FAIL if
-      delta > 0. If delta < 0 or uptime(end) < uptime(start), the AP rebooted
-      during the run and the result is INCONCLUSIVE (counter_reset), not PASS.
-      If the end reading is missing, the result is INCONCLUSIVE
-      (end_sample_missing).
+      rx_errors is a lifetime counter, so the check compares readings taken at
+      run start and run end. The window is the run duration, with no added
+      wait. The absolute value is kept in evidence.
+    requires: [AP-00]
+    vars: {port: {expect: uplink_port}}
+    collect: {method: mist_api, source: site_device_stats, sampling: run_start_and_end}
+    target: {kind: ap, select: {field: type, equals: ap}}
+    pass_when:
+      all:
+        - field: port_stat.<port>.rx_errors
+          unchanged_during_run: true
+          reset_guard: uptime
+    evidence: [port_stat.<port>.rx_errors, port_stat.<port>.rx_pkts, uptime]

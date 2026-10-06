@@ -15,11 +15,11 @@ summary_column: H
 allowed_statuses: [Not Started, Issue Reported, In-Progress, Complete, Not Applicable]
 
 # Check verdict (after rolling up across all APs) -> MOP status.
-# Not Started means: the tool could not decide, so a human must do this row.
+# ERROR and SKIP map to Not Started: the tool could not decide, so a
+# human must do this row.
 verdict_to_status:
   PASS: Complete
   FAIL: Issue Reported
-  INCONCLUSIVE: Issue Reported
   ERROR: Not Started
   SKIP: Not Started
 
