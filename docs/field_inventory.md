@@ -25,6 +25,19 @@ This file deliberately contains no device names, addresses or example values.
 The per-device endpoint `GET /api/v1/sites/{site_id}/stats/devices/{device_id}` returns
 the same key set as one item of this list, so it is not needed.
 
+**Pagination, verified on a live capture.** The request takes `limit` and `page` (1-based).
+With limit=10, pages 1 and 2 returned 10 different APs each, with no overlap. Responses carry
+these headers:
+
+| Header | Type | Example meaning |
+|---|---|---|
+| `X-Page-Total` | int (as string) | total items across all pages |
+| `X-Page-Limit` | int (as string) | the `limit` applied |
+| `X-Page-Page` | int (as string) | the page returned |
+
+The collector stops at a short page or once `X-Page-Total` items are collected. It fails if the
+final count differs from `X-Page-Total`, or if a later page repeats earlier items.
+
 | Path | Type | Presence | Notes |
 |---|---|---|---|
 | `id` | str | always | Device UUID |

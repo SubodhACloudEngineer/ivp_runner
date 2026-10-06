@@ -1,0 +1,27 @@
+{
+  "country_code": "ES",
+  "timezone": "Europe/Madrid",
+  "sitegroup_ids": [
+    "00000016-1111-4111-8111-000000000016",
+    "00000017-1111-4111-8111-000000000017"
+  ],
+  "notes": "",
+  "latlng": {
+    "lat": 0.0,
+    "lng": 0.0
+  },
+  "id": "00000002-1111-4111-8111-000000000002",
+  "name": "Test Site",
+  "org_id": "00000001-1111-4111-8111-000000000001",
+  "created_time": 1741617666,
+  "modified_time": 1775798132,
+  "rftemplate_id": "00000018-1111-4111-8111-000000000018",
+  "aptemplate_id": null,
+  "secpolicy_id": null,
+  "alarmtemplate_id": null,
+  "networktemplate_id": "00000019-1111-4111-8111-000000000019",
+  "gatewaytemplate_id": null,
+  "routertemplate_id": null,
+  "sitetemplate_id": null,
+  "tzoffset": 60
+}

@@ -2,15 +2,15 @@ import json
 
 import pytest
 
+from ivp_runner.assert_engine import evaluate, write_evidence, write_results
 from ivp_runner.catalogue import Catalogue
-from ivp_runner.evaluator import evaluate, write_evidence, write_results
 from ivp_runner.results import Reason, TestResult, Verdict
 
 from .factories import DELETE, ap, catalogue, context, disconnected, payloads, profile
 
 
 def run(start, end=None, prof=None, cat=None):
-    evs = evaluate(cat or catalogue(), prof or profile(), payloads(start, end), context())
+    evs = evaluate(cat or catalogue(), prof or profile(), *payloads(start, end), context())
     return {(e.result.test_id, e.result.device.id if e.result.device else None): e for e in evs}
 
 
@@ -132,7 +132,7 @@ def test_unimplemented_method_is_error():
 
 
 def test_missing_payload_is_api_error():
-    evs = evaluate(catalogue(), profile(), {}, context())
+    evs = evaluate(catalogue(), profile(), {}, None, context())
     assert {(e.result.verdict, e.result.reason) for e in evs} == {(Verdict.ERROR, Reason.API_ERROR)}
     assert len(evs) == 6
 
@@ -151,7 +151,7 @@ def test_non_targets_are_ignored():
 
 
 def test_result_record_traces_to_raw_payload_and_evidence(tmp_path):
-    evs = evaluate(catalogue(), profile(), payloads([ap(1), ap(2)]), context(str(tmp_path)))
+    evs = evaluate(catalogue(), profile(), *payloads([ap(1), ap(2)]), context(str(tmp_path)))
     r = next(
         e.result for e in evs if e.result.test_id == "AP-02" and e.result.device.name == "AP-TEST-2"
     )

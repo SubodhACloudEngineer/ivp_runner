@@ -3,7 +3,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from ivp_runner.evaluator import evaluate
+from ivp_runner.assert_engine import evaluate
 from ivp_runner.mop_writer import load_mapping, render_cells, write_results
 from ivp_runner.results import Verdict
 from ivp_runner.xlsx_patch import PatchError, read_cell_texts
@@ -24,7 +24,7 @@ DESCRIPTIONS = {
 def results():
     """AP 1 healthy; AP 2 power-constrained; AP 9 disconnected; AP-03 has no subnet."""
     start = [ap(1), ap(2, power_constrained=True), disconnected(9)]
-    evs = evaluate(catalogue(), profile(mgmt_subnet=None), payloads(start), context())
+    evs = evaluate(catalogue(), profile(mgmt_subnet=None), *payloads(start), context())
     return [e.result for e in evs]
 
 

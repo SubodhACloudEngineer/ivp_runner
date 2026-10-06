@@ -5,7 +5,8 @@ sent only in the Authorization header, and never printed or written to disk
 (it is scrubbed from any response body that happens to echo it).
 
 Usage:
-    MIST_API_TOKEN=... python scripts/capture_samples.py \
+    read -rs MIST_API_TOKEN && export MIST_API_TOKEN
+    python scripts/capture_samples.py \
         --org-id <org_uuid> --site-id <site_uuid> [--api-host api.mist.com]
 """
 
@@ -51,15 +52,52 @@ def get(session: requests.Session, base: str, path: str, params: dict) -> reques
     return session.get(base + path, params=params or None, timeout=TIMEOUT)
 
 
+def clean_token(raw: str | None) -> str:
+    """Bare key from MIST_API_TOKEN; exits with a reason (never the token) if malformed.
+
+    Same rules as ivp_runner.collectors.normalize_token, duplicated so this
+    throwaway script runs without the package installed.
+    """
+    if raw is None or not raw.strip():
+        sys.exit("MIST_API_TOKEN is not set (read -rs MIST_API_TOKEN && export MIST_API_TOKEN)")
+    token = raw.strip()
+    if token[:6].lower() == "token ":
+        print("note: removed a leading 'Token ' from MIST_API_TOKEN; paste only the key next time")
+        token = token[6:].lstrip()
+    for i, ch in enumerate(token):
+        if ch.isspace():
+            kind = "a line break" if ch in "\r\n" else "a tab" if ch == "\t" else "a space"
+            sys.exit(
+                f"MIST_API_TOKEN contains {kind} at character {i + 1} of {len(token)}; "
+                "paste only the key itself (no 'Token ' prefix, no quotes, one line)"
+            )
+    return token
+
+
+HEADERS: dict[str, dict] = {}  # slug -> response headers (cookies dropped)
+
+
+class AuthFailed(Exception):
+    pass
+
+
 def save(slug: str, resp: requests.Response, token: str) -> None:
+    """Save the body. A failed response never overwrites a good earlier capture."""
+    HEADERS[slug] = {
+        k: v.replace(token, "<REDACTED_TOKEN>")
+        for k, v in resp.headers.items()
+        if k.lower() not in ("set-cookie", "cookie")
+    }
     try:
         body = json.dumps(resp.json(), indent=2, sort_keys=False, ensure_ascii=False)
     except ValueError:
         body = resp.text
     body = body.replace(token, "<REDACTED_TOKEN>")
-    out = SAMPLES_DIR / f"{slug}.json"
-    out.write_text(body + "\n", encoding="utf-8")
-    print(f"  {resp.status_code}  {slug}.json  ({len(body)} bytes)")
+    name = f"{slug}.json" if resp.ok else f"{slug}.error.json"
+    (SAMPLES_DIR / name).write_text(body + "\n", encoding="utf-8")
+    print(f"  {resp.status_code}  {name}  ({len(body)} bytes)")
+    if resp.status_code in (401, 403):
+        raise AuthFailed(body.strip()[:200])
 
 
 def main() -> int:
@@ -69,16 +107,28 @@ def main() -> int:
     ap.add_argument("--api-host", default="api.mist.com")
     args = ap.parse_args()
 
-    token = os.environ.get("MIST_API_TOKEN")
-    if not token:
-        print("MIST_API_TOKEN is not set", file=sys.stderr)
-        return 2
+    token = clean_token(os.environ.get("MIST_API_TOKEN"))
 
     SAMPLES_DIR.mkdir(exist_ok=True)
     base = f"https://{args.api_host}"
     session = requests.Session()
     session.headers.update({"Authorization": f"Token {token}", "Accept": "application/json"})
 
+    try:
+        failures = capture(session, base, args, token)
+    except AuthFailed as e:
+        print(f"\nSTOPPED: Mist rejected the token: {e}", file=sys.stderr)
+        print("Existing good samples were left untouched.", file=sys.stderr)
+        return 1
+    finally:
+        headers_out = SAMPLES_DIR / "_response_headers.json"
+        headers_out.write_text(json.dumps(HEADERS, indent=2) + "\n", encoding="utf-8")
+
+    print(f"done: {failures} non-2xx response(s); files in {SAMPLES_DIR}")
+    return 1 if failures else 0
+
+
+def capture(session: requests.Session, base: str, args, token: str) -> int:
     failures = 0
     stats_resp = None
     for slug, path, params in site_endpoints(args.org_id, args.site_id):
@@ -102,8 +152,22 @@ def main() -> int:
                 save(f"site_stats_device_{dev_id}", resp, token)
                 failures += not resp.ok
 
-    print(f"done: {failures} non-2xx response(s); files in {SAMPLES_DIR}")
-    return 1 if failures else 0
+    # Pagination probe: does `page` page through results? Compare the two pages'
+    # ids and the X-Page-* headers. Two small GETs, read-only.
+    print("pagination probe (limit=10):")
+    for page in (1, 2):
+        resp = get(
+            session,
+            base,
+            f"/api/v1/sites/{args.site_id}/stats/devices",
+            {"type": "ap", "limit": 10, "page": page},
+        )
+        save(f"page_probe_stats_limit10_page{page}", resp, token)
+        failures += not resp.ok
+        paging = {k: v for k, v in resp.headers.items() if k.lower().startswith("x-page-")}
+        ids = [d.get("id") for d in resp.json()] if resp.ok else []
+        print(f"    page {page}: {len(ids)} items, headers {paging or 'none'}")
+    return failures
 
 
 if __name__ == "__main__":

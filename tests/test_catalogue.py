@@ -6,10 +6,11 @@ from pydantic import ValidationError
 
 from ivp_runner.catalogue import (
     Catalogue,
+    CatalogueError,
+    catalogue_problems,
     explain,
-    inventory_paths,
+    inventory_sections,
     load_catalogue,
-    unknown_field_paths,
 )
 from ivp_runner.criteria import describe
 from ivp_runner.site_profile import MissingExpectation, load_site_profile
@@ -28,10 +29,12 @@ def test_shipped_catalogue_loads_in_dependency_order():
     assert all(c.requires == ["AP-00"] for c in cat.checks[1:])
 
 
-def test_every_field_path_is_in_the_inventory():
-    inventory = inventory_paths((ROOT / "docs" / "field_inventory.md").read_text(encoding="utf-8"))
-    assert len(inventory) > 30
-    assert unknown_field_paths(load_catalogue(CATALOGUE), inventory) == {}
+def test_every_field_path_is_in_its_inventory_section():
+    sections = inventory_sections(
+        (ROOT / "docs" / "field_inventory.md").read_text(encoding="utf-8")
+    )
+    assert len(sections["Endpoint: AP stats"]) > 30
+    assert catalogue_problems(load_catalogue(CATALOGUE), sections) == {}
 
 
 def test_partial_checks_and_mop_descriptions():
@@ -158,3 +161,45 @@ def test_site_profile_missing_and_invalid_values():
         profile(dns_servers=["dns.example"])
     with pytest.raises(ValidationError):
         profile(min_uplink_speed_mbps=0)
+
+
+# ---------------------------------------------------------------- load-time inventory checks
+
+
+def _write(tmp_path, raw):
+    p = tmp_path / "cat.yaml"
+    p.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return p
+
+
+def test_undocumented_field_fails_at_load_time(raw, tmp_path):
+    raw["checks"][2]["pass_when"]["all"][0]["field"] = "power_mode_guess"
+    with pytest.raises(
+        CatalogueError, match=r"AP-02: power_mode_guess \(not in 'Endpoint: AP stats'\)"
+    ):
+        load_catalogue(_write(tmp_path, raw))
+
+
+def test_undocumented_evidence_field_fails_at_load_time(raw, tmp_path):
+    raw["checks"][3]["evidence"].append("ip_stat.vlan_id")
+    with pytest.raises(CatalogueError, match="ip_stat.vlan_id"):
+        load_catalogue(_write(tmp_path, raw))
+
+
+def test_field_from_another_endpoint_section_is_rejected(raw, tmp_path):
+    # `timezone` is documented, but for the site endpoint, not AP stats.
+    raw["checks"][2]["evidence"].append("timezone")
+    with pytest.raises(CatalogueError, match=r"timezone \(not in 'Endpoint: AP stats'\)"):
+        load_catalogue(_write(tmp_path, raw))
+
+
+def test_unknown_source_fails_at_load_time(raw, tmp_path):
+    raw["checks"][2]["collect"]["source"] = "org_everything"
+    with pytest.raises(CatalogueError, match="unknown mist_api source 'org_everything'"):
+        load_catalogue(_write(tmp_path, raw))
+
+
+def test_schema_errors_are_catalogue_errors(raw, tmp_path):
+    raw["checks"][2]["surprise"] = 1
+    with pytest.raises(CatalogueError, match="Extra inputs"):
+        load_catalogue(_write(tmp_path, raw))
