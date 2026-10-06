@@ -41,5 +41,30 @@ class CollectorConfigError(RuntimeError):
     """The collector cannot start at all (e.g. no API token)."""
 
 
+def normalize_token(raw: str | None) -> str:
+    """Return the bare API key, or raise CollectorConfigError without echoing it.
+
+    Surrounding whitespace is stripped and a leading ``Token `` prefix (the
+    header scheme, often pasted by mistake) is removed. Whitespace left inside
+    the key is reported by position only.
+    """
+    if raw is None or not raw.strip():
+        raise CollectorConfigError(
+            "MIST_API_TOKEN is not set. Export it in your shell "
+            "(read -rs MIST_API_TOKEN && export MIST_API_TOKEN); never put it in a file."
+        )
+    token = raw.strip()
+    if token[:6].lower() == "token ":
+        token = token[6:].lstrip()
+    for i, ch in enumerate(token):
+        if ch.isspace():
+            kind = {"\n": "a line break", "\r": "a line break", "\t": "a tab"}.get(ch, "a space")
+            raise CollectorConfigError(
+                f"MIST_API_TOKEN contains {kind} at character {i + 1} of {len(token)}; "
+                "paste only the key itself (no 'Token ' prefix, no quotes, one line)"
+            )
+    return token
+
+
 # Per phase: source name -> Payload, or the CollectError that stopped it.
 Collection = dict[str, Payload | CollectError]

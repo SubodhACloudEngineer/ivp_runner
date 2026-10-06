@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 import requests
 
-from ivp_runner.collectors import CollectError, Collection, CollectorConfigError, Payload
+from ivp_runner.collectors import CollectError, Collection, Payload, normalize_token
 
 TIMEOUT = 30
 MAX_PAGES = 100
@@ -75,12 +75,7 @@ class MistApiCollector:
         max_retries: int = 5,
         page_limit: int = 1000,
     ):
-        token = token or os.environ.get("MIST_API_TOKEN")
-        if not token:
-            raise CollectorConfigError(
-                "MIST_API_TOKEN is not set. Export it in your shell "
-                "(export MIST_API_TOKEN=...); never put it in a file."
-            )
+        token = normalize_token(token or os.environ.get("MIST_API_TOKEN"))
         self._host = host
         self._token = token
         self._session = session or requests.Session()

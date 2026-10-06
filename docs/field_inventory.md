@@ -31,6 +31,10 @@ server ignores `page` and repeats items, the collector stops with an error rathe
 duplicating them. `scripts/capture_samples.py` now runs a two-page probe with limit=10 and
 records response headers, so the next capture confirms or refutes this.
 
+Observed so far: every response advertises `X-Page-Limit`, `X-Page-Page` and `X-Page-Total`
+in `Access-Control-Expose-Headers`. That was seen on 401 responses only, so it is evidence of
+paging support, not proof of how paging behaves. The collector does not read these headers yet.
+
 | Path | Type | Presence | Notes |
 |---|---|---|---|
 | `id` | str | always | Device UUID |

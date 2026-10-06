@@ -229,3 +229,33 @@ def test_collector_source_has_no_write_verbs():
     src = inspect.getsource(mist_api)
     for verb in (".post(", ".put(", ".delete(", ".patch(", ".request("):
         assert verb not in src
+
+
+# ---------------------------------------------------------------- token normalisation
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [f"  {TOKEN}\n", f"Token {TOKEN}", f"token  {TOKEN} "],
+)
+def test_token_whitespace_and_scheme_prefix_are_tolerated(tmp_path, raw):
+    session = FakeSession({STATS: [ok([])]})
+    c = MistApiCollector("api.example", token=raw, session=session, sleep=lambda s: None)
+    c.fetch("site_device_stats", SITE, tmp_path, "start")
+    assert session.calls[0]["headers"]["Authorization"] == f"Token {TOKEN}"
+
+
+@pytest.mark.parametrize(
+    "raw, message",
+    [
+        (TOKEN[:6] + " " + TOKEN[6:], "contains a space at character 7 of"),
+        (TOKEN[:6] + "\n" + TOKEN[6:], "contains a line break at character 7"),
+        ("   ", "MIST_API_TOKEN is not set"),
+    ],
+)
+def test_malformed_token_fails_before_any_request_without_echoing(raw, message):
+    session = FakeSession({})
+    with pytest.raises(CollectorConfigError, match=message) as e:
+        MistApiCollector("api.example", token=raw, session=session)
+    assert TOKEN[6:] not in str(e.value) and TOKEN[:6] not in str(e.value)
+    assert session.calls == []
