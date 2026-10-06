@@ -1,0 +1,42 @@
+# Where AP check results land in the MOP workbook's "IVP Test Plan" sheet.
+#
+# The writer refuses to write if a row's description cell does not start
+# with `expect_description`. That guards against a template whose rows have
+# moved. It also refuses to overwrite a summary cell that holds anything a
+# human wrote; it only replaces text it wrote itself.
+
+schema_version: 1
+sheet: IVP Test Plan
+description_column: B
+status_column: D
+summary_column: H
+
+# The status column has a dropdown limited to these values.
+allowed_statuses: [Not Started, Issue Reported, In-Progress, Complete, Not Applicable]
+
+# Check verdict (after rolling up across all APs) -> MOP status.
+# Not Started means: the tool could not decide, so a human must do this row.
+verdict_to_status:
+  PASS: Complete
+  FAIL: Issue Reported
+  INCONCLUSIVE: Issue Reported
+  ERROR: Not Started
+  SKIP: Not Started
+
+rows:
+  - row: 57
+    test_ids: [AP-00]
+    expect_description: Go to Access-points
+  - row: 58
+    test_ids: [AP-01]
+    expect_description: Check the WLANs box
+  - row: 59
+    test_ids: [AP-02]
+    expect_description: Check the Power mode
+  - row: 60
+    test_ids: [AP-03]
+    expect_description: Check the status to confirm
+  # One MOP row covers both uplink checks; its status is the rollup of the two.
+  - row: 61
+    test_ids: [AP-04, AP-05]
+    expect_description: Make sure the Ethernet properties
