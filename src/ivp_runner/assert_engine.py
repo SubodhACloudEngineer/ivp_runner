@@ -143,7 +143,6 @@ def _evaluate_check(
             )
         except Exception as e:  # one bad device must not abort the check
             base = _base(check, ctx, device, start.collected_at, [])
-            base["evidence_path"] = None
             out.append(
                 Evaluation(
                     TestResult(
@@ -184,7 +183,6 @@ def _evaluate_device(
     blocked = [r for r in check.requires if verdicts.get((r, device.id)) is not Verdict.PASS]
     if blocked:
         msg = f"precondition {', '.join(blocked)} did not pass for this device"
-        base["evidence_path"] = None  # nothing was evaluated, so no evidence file
         return Evaluation(
             TestResult(**base, verdict=Verdict.SKIP, reason=Reason.PRECONDITION_FAILED, message=msg)
         )
@@ -259,11 +257,10 @@ def _base(
     check: Check, ctx: RunContext, device: DeviceRef | None, when: datetime, refs: list[RawRef]
 ) -> dict:
     utc, local = timestamps(when, ctx.timezone)
-    evidence_path = (
-        str(Path(ctx.out_dir) / "evidence" / check.test_id / f"{device.id}.json")
-        if device
-        else None
-    )
+    # One evidence card (PNG) per result, including SKIPs and site-wide errors;
+    # write_evidence puts the field-level JSON next to it.
+    name = device.id if device else "site"
+    evidence_path = str(Path(ctx.out_dir) / "evidence" / check.test_id / f"{name}.png")
     return {
         "run_id": ctx.run_id,
         "test_id": check.test_id,
@@ -299,13 +296,17 @@ def _index_by_id(payload: Payload) -> dict[str, tuple[int, dict]]:
 
 
 def write_evidence(evaluations: list[Evaluation]) -> int:
-    """Write each evaluation's evidence JSON to its evidence_path. Returns files written."""
+    """Write each evaluation's field-level evidence as JSON beside its card.
+
+    The card itself (``evidence_path``, a PNG) is rendered by
+    ``ivp_runner.evidence.write_cards``. Returns the number of JSON files written.
+    """
     n = 0
     for ev in evaluations:
         path = ev.result.evidence_path
         if not path or not ev.evidence:
             continue
-        p = Path(path)
+        p = Path(path).with_suffix(".json")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(ev.evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         n += 1

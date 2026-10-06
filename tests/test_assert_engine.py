@@ -162,10 +162,10 @@ def test_result_record_traces_to_raw_payload_and_evidence(tmp_path):
     assert r.actual == {"power_constrained": False}
 
     assert write_evidence(evs) == 12
-    evidence = json.loads(open(r.evidence_path).read())
+    evidence = json.loads(open(r.evidence_path.replace(".png", ".json")).read())
     assert evidence["fields"]["power_src"] == "LLDP"
     ap05 = next(e for e in evs if e.result.test_id == "AP-05")
-    assert json.loads(open(ap05.result.evidence_path).read())["fields"][
+    assert json.loads(open(ap05.result.evidence_path.replace(".png", ".json")).read())["fields"][
         "port_stat.eth0.rx_errors"
     ] == {
         "start": 7,

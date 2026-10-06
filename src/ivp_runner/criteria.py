@@ -259,7 +259,10 @@ def _evaluate_one(
     rule = describe_assertion(a)
     try:
         path = fill(path, vars_)
-        rule = describe_assertion(a.model_copy(update={"field": path}))
+        update: dict[str, Any] = {"field": path}
+        if isinstance(a.operand, ExpectRef):  # show e.g. ssid_count.band_5, not <band>
+            update[a.op] = ExpectRef(expect=fill(a.operand.expect, vars_))
+        rule = describe_assertion(a.model_copy(update=update))
         expected = _resolve(a.operand, profile, vars_)
     except MissingExpectation as e:
         return _error(path, rule, Reason.EXPECTATION_MISSING, f"site profile has no {e}")
