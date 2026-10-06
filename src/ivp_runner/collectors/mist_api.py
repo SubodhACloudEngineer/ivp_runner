@@ -64,6 +64,17 @@ SOURCES: dict[str, Source] = {
 ALWAYS_AT_START = ("site",)
 
 
+def _int_header(headers: dict, name: str, default: int | None) -> int | None:
+    """Case-insensitive integer header, or ``default`` if absent or not a number."""
+    for k, v in headers.items():
+        if k.lower() == name.lower():
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
 class MistApiCollector:
     def __init__(
         self,
@@ -130,7 +141,9 @@ class MistApiCollector:
         path = spec.path.format(site_id=site_id)
 
         if spec.kind == "object":
-            body, data = self._get_json(path, dict(spec.params), raw_dir / f"{source}.{phase}.json")
+            body, data, _ = self._get_json(
+                path, dict(spec.params), raw_dir / f"{source}.{phase}.json"
+            )
             if not isinstance(data, dict):
                 raise CollectError(
                     f"GET {spec.path}: expected an object, got {type(data).__name__}"
@@ -142,12 +155,17 @@ class MistApiCollector:
         items: list = []
         seen: set[str] = set()
         id_key = spec.identity.get("id", "id")
-        # Paging with `page` is NOT verified against a captured response: only
-        # `limit` is. The duplicate check below makes a server that ignores
-        # `page` fail loudly instead of looping or double-counting.
+        # Paging verified against a live capture (limit=10, pages 1 and 2 returned
+        # disjoint items; headers X-Page-Total/-Limit/-Page present). We stop on a
+        # short page or once X-Page-Total items are in hand, and cross-check the
+        # count. The duplicate check still guards against a server ignoring `page`.
+        total: int | None = None
         for page in range(1, MAX_PAGES + 1):
             params = {**spec.params, "limit": str(self._page_limit), "page": str(page)}
-            _, data = self._get_json(path, params, raw_dir / f"{source}.{phase}.p{page}.json")
+            _, data, headers = self._get_json(
+                path, params, raw_dir / f"{source}.{phase}.p{page}.json"
+            )
+            total = _int_header(headers, "X-Page-Total", total)
             if not isinstance(data, list):
                 raise CollectError(f"GET {spec.path}: expected a list, got {type(data).__name__}")
             ids = {str(it.get(id_key)) for it in data if isinstance(it, dict) and id_key in it}
@@ -158,13 +176,18 @@ class MistApiCollector:
                 )
             seen |= ids
             items.extend(data)
-            if len(data) < self._page_limit:
+            if len(data) < self._page_limit or (total is not None and len(items) >= total):
                 break
         else:
             raise CollectError(
                 f"GET {spec.path}: more than {MAX_PAGES} pages; refusing to continue"
             )
 
+        if total is not None and len(items) != total:
+            raise CollectError(
+                f"GET {spec.path}: X-Page-Total says {total} items but {len(items)} were "
+                "returned; the list changed during collection or paging is broken"
+            )
         combined = (json.dumps(items, indent=2, ensure_ascii=False) + "\n").encode()
         combined_path = raw_dir / f"{source}.{phase}.json"
         combined_path.write_bytes(combined)
@@ -182,8 +205,11 @@ class MistApiCollector:
             identity=dict(spec.identity),
         )
 
-    def _get_json(self, path: str, params: dict, save_to: Path) -> tuple[bytes, Any]:
-        """GET with retries; save the body verbatim (token scrubbed); return (bytes, parsed)."""
+    def _get_json(self, path: str, params: dict, save_to: Path) -> tuple[bytes, Any, dict]:
+        """GET with retries; save the body verbatim (token scrubbed).
+
+        Returns (raw bytes, parsed JSON, response headers).
+        """
         url = f"https://{self._host}{path}"
         headers = {"Authorization": f"Token {self._token}", "Accept": "application/json"}
         for attempt in range(1, self._max_retries + 2):
@@ -234,7 +260,7 @@ class MistApiCollector:
             entry["saved_as"] = save_to.name
             entry["sha256"] = hashlib.sha256(body).hexdigest()
             try:
-                return body, json.loads(body)
+                return body, json.loads(body), dict(resp.headers)
             except ValueError:
                 raise CollectError(f"GET {path}: response is not JSON") from None
         raise AssertionError("unreachable")  # pragma: no cover

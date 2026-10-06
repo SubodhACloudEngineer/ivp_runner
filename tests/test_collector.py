@@ -259,3 +259,43 @@ def test_malformed_token_fails_before_any_request_without_echoing(raw, message):
         MistApiCollector("api.example", token=raw, session=session)
     assert TOKEN[6:] not in str(e.value) and TOKEN[:6] not in str(e.value)
     assert session.calls == []
+
+
+# ---------------------------------------------------------------- X-Page-* headers (verified live)
+
+
+def paged(items, page, limit, total):
+    """A page as Mist returned it in the live probe: body plus X-Page-* headers."""
+    chunk = items[(page - 1) * limit : page * limit]
+    return ok(
+        chunk, {"X-Page-Total": str(total), "X-Page-Limit": str(limit), "X-Page-Page": str(page)}
+    )
+
+
+def test_stops_when_x_page_total_reached_without_extra_request(tmp_path):
+    items = stats_items()[:40]
+    # 40 items, limit 20: page 2 is full, but X-Page-Total says we're done.
+    session = FakeSession({STATS: [paged(items, 1, 20, 40), paged(items, 2, 20, 40)]})
+    c, _ = collector(session, page_limit=20)
+    p = c.fetch("site_device_stats", SITE, tmp_path, "start")
+    assert len(p.items) == 40
+    assert [call["params"]["page"] for call in session.calls] == ["1", "2"]
+
+
+def test_count_mismatch_with_x_page_total_is_an_error(tmp_path):
+    items = stats_items()[:30]
+    # Server claims 31 items but the last page comes back short.
+    session = FakeSession({STATS: [paged(items, 1, 20, 31), paged(items, 2, 20, 31)]})
+    c, _ = collector(session, page_limit=20)
+    with pytest.raises(CollectError, match="X-Page-Total says 31 items but 30 were returned"):
+        c.fetch("site_device_stats", SITE, tmp_path, "start")
+
+
+def test_paging_headers_are_kept_in_manifest(tmp_path):
+    items = stats_items()
+    session = FakeSession({STATS: [paged(items, 1, 1000, 91)], SITE_PATH: [ok(site_doc())]})
+    c, _ = collector(session)
+    c.collect(catalogue(), "large", SITE, tmp_path, "start")
+    manifest = json.loads((tmp_path / "raw" / "manifest.json").read_text())
+    stats = next(m for m in manifest if m["path"] == STATS)
+    assert stats["response_headers"]["X-Page-Total"] == "91"

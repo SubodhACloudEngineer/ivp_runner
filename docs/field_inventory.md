@@ -25,15 +25,18 @@ This file deliberately contains no device names, addresses or example values.
 The per-device endpoint `GET /api/v1/sites/{site_id}/stats/devices/{device_id}` returns
 the same key set as one item of this list, so it is not needed.
 
-**Pagination is unverified.** The captures only prove that `limit` is honoured (limit=1000
-returned all 91 APs). The collector requests `page=1,2,…` and stops at a short page. If the
-server ignores `page` and repeats items, the collector stops with an error rather than
-duplicating them. `scripts/capture_samples.py` now runs a two-page probe with limit=10 and
-records response headers, so the next capture confirms or refutes this.
+**Pagination, verified on a live capture.** The request takes `limit` and `page` (1-based).
+With limit=10, pages 1 and 2 returned 10 different APs each, with no overlap. Responses carry
+these headers:
 
-Observed so far: every response advertises `X-Page-Limit`, `X-Page-Page` and `X-Page-Total`
-in `Access-Control-Expose-Headers`. That was seen on 401 responses only, so it is evidence of
-paging support, not proof of how paging behaves. The collector does not read these headers yet.
+| Header | Type | Example meaning |
+|---|---|---|
+| `X-Page-Total` | int (as string) | total items across all pages |
+| `X-Page-Limit` | int (as string) | the `limit` applied |
+| `X-Page-Page` | int (as string) | the page returned |
+
+The collector stops at a short page or once `X-Page-Total` items are collected. It fails if the
+final count differs from `X-Page-Total`, or if a later page repeats earlier items.
 
 | Path | Type | Presence | Notes |
 |---|---|---|---|
