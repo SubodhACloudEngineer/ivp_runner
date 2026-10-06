@@ -12,6 +12,7 @@ dependencies = [
     "requests",
     "pyyaml",
     "openpyxl",
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
