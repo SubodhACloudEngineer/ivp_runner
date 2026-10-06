@@ -1,18 +1,27 @@
-"""Evaluate a catalogue against collected payloads. Pure apart from write_* helpers.
+"""Assertion engine: catalogue entries + collected data -> result records.
 
-Nothing here is specific to a check: every check is the same loop over its
-catalogue entry. A new check is new YAML.
+Nothing here is specific to a check: every check runs through the same loop
+over its catalogue entry, so a new check is new YAML.
+
+Trust rules enforced here:
+* A missing field, expectation, sample or payload is ERROR, never FAIL.
+* An unexpected exception in one check, or for one device, becomes ERROR
+  (engine_error) for that check or device only. The run always completes.
+
+Pure apart from the write_* helpers.
 """
 
 from __future__ import annotations
 
 import json
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ivp_runner.catalogue import Catalogue, Check
+from ivp_runner.collectors import IMPLEMENTED_METHODS, CollectError, Collection, Payload
 from ivp_runner.criteria import (
     MISSING,
     Criterion,
@@ -25,7 +34,6 @@ from ivp_runner.criteria import (
 from ivp_runner.criteria import (
     evaluate as evaluate_criterion,
 )
-from ivp_runner.methods import IMPLEMENTED_METHODS, Payload
 from ivp_runner.results import (
     AssertionResult,
     DeviceRef,
@@ -55,32 +63,37 @@ class Evaluation:
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
-# Payloads keyed by (method, source) -> {sample: Payload}; sample is "once", "start" or "end".
-Payloads = dict[tuple[str, str], dict[str, Payload]]
-
-
 def evaluate(
-    catalogue: Catalogue, profile: SiteProfile, payloads: Payloads, ctx: RunContext
+    catalogue: Catalogue,
+    profile: SiteProfile,
+    start: Collection,
+    end: Collection | None,
+    ctx: RunContext,
 ) -> list[Evaluation]:
+    """Evaluate every applicable check. Never raises because of one check."""
     out: list[Evaluation] = []
     verdicts: dict[tuple[str, str], Verdict] = {}  # (test_id, device_id) -> verdict
     for check in catalogue.ordered():
         if not check.applies_to(profile.site_class):
             continue
-        for ev in _evaluate_check(check, profile, payloads, ctx, verdicts):
+        try:
+            evaluations = _evaluate_check(check, profile, start, end or {}, ctx, verdicts)
+        except Exception as e:  # one bad check must not abort the run
+            evaluations = [_site_error(check, ctx, Reason.ENGINE_ERROR, _describe_exc(e))]
+        for ev in evaluations:
             if ev.result.device is not None:
                 verdicts[(check.test_id, ev.result.device.id)] = ev.result.verdict
             out.append(ev)
     return out
 
 
-def _evaluate_check(check: Check, profile, payloads: Payloads, ctx: RunContext, verdicts):
+def _evaluate_check(
+    check: Check, profile, start_c: Collection, end_c: Collection, ctx: RunContext, verdicts
+) -> list[Evaluation]:
     method = check.collect.method
     if method not in IMPLEMENTED_METHODS:
-        yield _site_error(
-            check, ctx, Reason.METHOD_UNAVAILABLE, f"method {method!r} is not implemented"
-        )
-        return
+        msg = f"method {method!r} is not implemented"
+        return [_site_error(check, ctx, Reason.METHOD_UNAVAILABLE, msg)]
 
     try:
         vars_ = {
@@ -88,52 +101,96 @@ def _evaluate_check(check: Check, profile, payloads: Payloads, ctx: RunContext, 
             for k, v in check.vars.items()
         }
     except MissingExpectation as e:
-        yield _site_error(check, ctx, Reason.EXPECTATION_MISSING, f"site profile has no {e}")
-        return
+        return [_site_error(check, ctx, Reason.EXPECTATION_MISSING, f"site profile has no {e}")]
 
-    samples = payloads.get((method, check.collect.source), {})
+    source = check.collect.source
     twice = check.collect.sampling == "run_start_and_end"
-    start = samples.get("start") if twice else (samples.get("once") or samples.get("start"))
-    end = samples.get("end") if twice else None
-    if start is None:
-        yield _site_error(
-            check, ctx, Reason.API_ERROR, f"no {method}:{check.collect.source} payload collected"
-        )
-        return
+    start = start_c.get(source)
+    if not isinstance(start, Payload):
+        why = str(start) if isinstance(start, CollectError) else "not collected"
+        return [_site_error(check, ctx, Reason.API_ERROR, f"{method}:{source}: {why}")]
+    end = None
+    if twice:
+        end = end_c.get(source)
+        if not isinstance(end, Payload):
+            why = str(end) if isinstance(end, CollectError) else "not collected"
+            msg = f"{method}:{source} run-end sample: {why}"
+            return [_site_error(check, ctx, Reason.SAMPLE_MISSING, msg)]
     end_index = _index_by_id(end) if end else {}
+    out: list[Evaluation] = []
 
     select = Criterion(all=[check.target.select])
     for i, item in enumerate(start.items):
         if evaluate_criterion(select, Samples(item), profile)[0].verdict is not Verdict.PASS:
             continue
         device = _device(item, start.identity, i)
-        refs = [
-            RawRef(
-                path=start.raw_path, sha256=start.raw_sha256, pointer=f"/{i}", sample=start.sample
-            )
-        ]
-        end_item = None
-        if end is not None and device.id in end_index:
-            j, end_item = end_index[device.id]
-            refs.append(
-                RawRef(path=end.raw_path, sha256=end.raw_sha256, pointer=f"/{j}", sample="end")
-            )
-        when = (end or start).collected_at
-        base = _base(check, ctx, device, when, refs)
-
-        blocked = [r for r in check.requires if verdicts.get((r, device.id)) is not Verdict.PASS]
-        if blocked:
-            msg = f"precondition {', '.join(blocked)} did not pass for this device"
-            base["evidence_path"] = None  # nothing was evaluated, so no evidence file
-            yield Evaluation(
-                TestResult(
-                    **base, verdict=Verdict.SKIP, reason=Reason.PRECONDITION_FAILED, message=msg
+        try:
+            out.append(
+                _evaluate_device(
+                    check,
+                    profile,
+                    ctx,
+                    verdicts,
+                    vars_,
+                    twice,
+                    start,
+                    end,
+                    end_index,
+                    i,
+                    item,
+                    device,
                 )
             )
-            continue
+        except Exception as e:  # one bad device must not abort the check
+            base = _base(check, ctx, device, start.collected_at, [])
+            base["evidence_path"] = None
+            out.append(
+                Evaluation(
+                    TestResult(
+                        **base,
+                        verdict=Verdict.ERROR,
+                        reason=Reason.ENGINE_ERROR,
+                        message=_describe_exc(e),
+                    )
+                )
+            )
+    return out
 
-        outcomes = evaluate_criterion(check.pass_when, Samples(item, end_item, vars_), profile)
-        yield Evaluation(_result(base, outcomes), _evidence(check, item, end_item, twice, vars_))
+
+def _evaluate_device(
+    check: Check,
+    profile: SiteProfile,
+    ctx: RunContext,
+    verdicts,
+    vars_: dict[str, str],
+    twice: bool,
+    start: Payload,
+    end: Payload | None,
+    end_index: dict,
+    i: int,
+    item: dict,
+    device: DeviceRef,
+) -> Evaluation:
+    refs = [
+        RawRef(path=start.raw_path, sha256=start.raw_sha256, pointer=f"/{i}", sample=start.sample)
+    ]
+    end_item = None
+    if end is not None and device.id in end_index:
+        j, end_item = end_index[device.id]
+        refs.append(RawRef(path=end.raw_path, sha256=end.raw_sha256, pointer=f"/{j}", sample="end"))
+    when = (end or start).collected_at
+    base = _base(check, ctx, device, when, refs)
+
+    blocked = [r for r in check.requires if verdicts.get((r, device.id)) is not Verdict.PASS]
+    if blocked:
+        msg = f"precondition {', '.join(blocked)} did not pass for this device"
+        base["evidence_path"] = None  # nothing was evaluated, so no evidence file
+        return Evaluation(
+            TestResult(**base, verdict=Verdict.SKIP, reason=Reason.PRECONDITION_FAILED, message=msg)
+        )
+
+    outcomes = evaluate_criterion(check.pass_when, Samples(item, end_item, vars_), profile)
+    return Evaluation(_result(base, outcomes), _evidence(check, item, end_item, twice, vars_))
 
 
 def _result(base: dict, outcomes: list[Outcome]) -> TestResult:
@@ -186,6 +243,12 @@ def _evidence(
         else:
             fields[path] = start
     return {"fields": fields}
+
+
+def _describe_exc(e: BaseException) -> str:
+    frame = traceback.extract_tb(e.__traceback__)[-1] if e.__traceback__ else None
+    where = f" at {Path(frame.filename).name}:{frame.lineno}" if frame else ""
+    return f"internal error {type(e).__name__}: {e}{where}"
 
 
 def _plain(v: Any) -> Any:

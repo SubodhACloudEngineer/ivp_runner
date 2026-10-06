@@ -41,6 +41,7 @@ class Reason(StrEnum):
     BAD_DATA = "bad_data"  # ERROR: field has an unexpected type/format
     METHOD_UNAVAILABLE = "method_unavailable"  # ERROR: backend not implemented
     API_ERROR = "api_error"  # ERROR: collection failed
+    ENGINE_ERROR = "engine_error"  # ERROR: unexpected exception evaluating this check
 
 
 _REASONS_BY_VERDICT = {

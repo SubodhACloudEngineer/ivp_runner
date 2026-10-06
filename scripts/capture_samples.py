@@ -51,7 +51,15 @@ def get(session: requests.Session, base: str, path: str, params: dict) -> reques
     return session.get(base + path, params=params or None, timeout=TIMEOUT)
 
 
+HEADERS: dict[str, dict] = {}  # slug -> response headers (cookies dropped)
+
+
 def save(slug: str, resp: requests.Response, token: str) -> None:
+    HEADERS[slug] = {
+        k: v.replace(token, "<REDACTED_TOKEN>")
+        for k, v in resp.headers.items()
+        if k.lower() not in ("set-cookie", "cookie")
+    }
     try:
         body = json.dumps(resp.json(), indent=2, sort_keys=False, ensure_ascii=False)
     except ValueError:
@@ -102,6 +110,20 @@ def main() -> int:
                 save(f"site_stats_device_{dev_id}", resp, token)
                 failures += not resp.ok
 
+    # Pagination probe: does `page` page through results? Compare the two pages'
+    # ids and the response headers. Two small GETs, read-only.
+    for page in (1, 2):
+        resp = get(
+            session,
+            base,
+            f"/api/v1/sites/{args.site_id}/stats/devices",
+            {"type": "ap", "limit": 10, "page": page},
+        )
+        save(f"page_probe_stats_limit10_page{page}", resp, token)
+        failures += not resp.ok
+
+    headers_out = SAMPLES_DIR / "_response_headers.json"
+    headers_out.write_text(json.dumps(HEADERS, indent=2) + "\n", encoding="utf-8")
     print(f"done: {failures} non-2xx response(s); files in {SAMPLES_DIR}")
     return 1 if failures else 0
 

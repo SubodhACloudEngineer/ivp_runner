@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ivp_runner.criteria import PLACEHOLDER_RE, Assertion, Criterion, ExpectRef, describe
 from ivp_runner.results import Method
@@ -141,26 +141,79 @@ class Catalogue(_Strict):
         return [by_id[t] for t in done]
 
 
-def load_catalogue(path: str | Path) -> Catalogue:
+DEFAULT_INVENTORY = Path(__file__).resolve().parents[2] / "docs" / "field_inventory.md"
+
+
+class CatalogueError(ValueError):
+    """The catalogue is invalid. Raised at load time, never during a run."""
+
+
+def load_catalogue(path: str | Path, inventory: str | Path | None = DEFAULT_INVENTORY) -> Catalogue:
+    """Load, validate and check every field path against the field inventory.
+
+    A path the inventory does not document fails here, loudly, before any API
+    call is made. Pass ``inventory=None`` only in tests of the schema itself.
+    """
     with open(path, encoding="utf-8") as fh:
-        return Catalogue.model_validate(yaml.safe_load(fh))
+        try:
+            catalogue = Catalogue.model_validate(yaml.safe_load(fh))
+        except ValidationError as e:
+            raise CatalogueError(f"{path}: {e}") from None
+    if inventory is not None:
+        sections = inventory_sections(Path(inventory).read_text(encoding="utf-8"))
+        problems = catalogue_problems(catalogue, sections)
+        if problems:
+            lines = [f"  {tid}: {msg}" for tid, msgs in problems.items() for msg in msgs]
+            raise CatalogueError(
+                f"{path}: fields or sources not documented in {Path(inventory).name}:\n"
+                + "\n".join(lines)
+            )
+    return catalogue
 
 
 # ---------------------------------------------------------------- field inventory
 
 
-def inventory_paths(markdown: str) -> set[str]:
-    """Field paths listed in docs/field_inventory.md tables (first column, in backticks)."""
-    return set(re.findall(r"^\| `([^`]+)` \|", markdown, re.M))
+def inventory_sections(markdown: str) -> dict[str, set[str]]:
+    """``## <heading>`` -> field paths in that section's table (first column, in backticks)."""
+    sections: dict[str, set[str]] = {}
+    current = None
+    for line in markdown.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections[current] = set()
+            continue
+        m = re.match(r"^\| `([^`]+)` \|", line)
+        if m and current is not None:
+            sections[current].add(m.group(1))
+    return sections
 
 
-def unknown_field_paths(catalogue: Catalogue, inventory: set[str]) -> dict[str, list[str]]:
-    """test_id -> paths not in the inventory. Placeholder names must match the inventory's."""
-    out = {}
+def catalogue_problems(catalogue: Catalogue, sections: dict[str, set[str]]) -> dict[str, list[str]]:
+    """test_id -> problems: unknown sources, or paths not in the source's inventory section."""
+    from ivp_runner.collectors.mist_api import SOURCES
+
+    registries = {"mist_api": SOURCES}
+    out: dict[str, list[str]] = {}
     for c in catalogue.checks:
-        missing = [p for p in c.field_paths() if p not in inventory]
-        if missing:
-            out[c.test_id] = missing
+        registry = registries.get(c.collect.method)
+        if registry is None:
+            continue  # not implemented yet; such checks report ERROR method_unavailable
+        source = registry.get(c.collect.source)
+        if source is None:
+            out.setdefault(c.test_id, []).append(
+                f"unknown {c.collect.method} source {c.collect.source!r}"
+            )
+            continue
+        documented = sections.get(source.inventory_section)
+        if documented is None:
+            out.setdefault(c.test_id, []).append(
+                f"inventory has no section {source.inventory_section!r}"
+            )
+            continue
+        for p in c.field_paths():
+            if p not in documented:
+                out.setdefault(c.test_id, []).append(f"{p} (not in {source.inventory_section!r})")
     return out
 
 

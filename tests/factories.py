@@ -6,9 +6,9 @@ import copy
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ivp_runner.assert_engine import RunContext
 from ivp_runner.catalogue import load_catalogue
-from ivp_runner.evaluator import RunContext
-from ivp_runner.methods import Payload
+from ivp_runner.collectors import Payload
 from ivp_runner.results import SiteRef
 from ivp_runner.site_profile import SiteProfile
 
@@ -110,7 +110,7 @@ def payload(items: list[dict], sample: str = "start", at: datetime = T0) -> Payl
         method="mist_api",
         source="site_device_stats",
         sample=sample,
-        items=copy.deepcopy(items),
+        data=copy.deepcopy(items),
         collected_at=at,
         raw_path=f"out/run-1/raw/site_device_stats.{sample}.json",
         raw_sha256="a" * 64,
@@ -118,10 +118,13 @@ def payload(items: list[dict], sample: str = "start", at: datetime = T0) -> Payl
     )
 
 
-def payloads(start: list[dict], end: list[dict] | None = None) -> dict:
-    samples = {"start": payload(start)}
-    samples["end"] = payload(end if end is not None else start, "end", T1)
-    return {("mist_api", "site_device_stats"): samples}
+def payloads(start: list[dict], end: list[dict] | None = None) -> tuple[dict, dict]:
+    """(start collection, end collection) for the stats source. End defaults to start."""
+    end_items = end if end is not None else start
+    return (
+        {"site_device_stats": payload(start)},
+        {"site_device_stats": payload(end_items, "end", T1)},
+    )
 
 
 def context(out_dir: str = "out/run-1") -> RunContext:

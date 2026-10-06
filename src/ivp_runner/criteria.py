@@ -306,6 +306,7 @@ def _unchanged(a: Assertion, samples: Samples, path: str, rule: str, vars_) -> O
             "not a number",
         )
     actual = {"start": start, "end": end, "delta": end - start}
+    expected = {"start": start, "end": start, "delta": 0}
     if a.reset_guard:
         guard = fill(a.reset_guard, vars_)
         g0, g1 = get_path(samples.start, guard), get_path(samples.end, guard)

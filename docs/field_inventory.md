@@ -25,6 +25,12 @@ This file deliberately contains no device names, addresses or example values.
 The per-device endpoint `GET /api/v1/sites/{site_id}/stats/devices/{device_id}` returns
 the same key set as one item of this list, so it is not needed.
 
+**Pagination is unverified.** The captures only prove that `limit` is honoured (limit=1000
+returned all 91 APs). The collector requests `page=1,2,…` and stops at a short page. If the
+server ignores `page` and repeats items, the collector stops with an error rather than
+duplicating them. `scripts/capture_samples.py` now runs a two-page probe with limit=10 and
+records response headers, so the next capture confirms or refutes this.
+
 | Path | Type | Presence | Notes |
 |---|---|---|---|
 | `id` | str | always | Device UUID |

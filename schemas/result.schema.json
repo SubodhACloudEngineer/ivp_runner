@@ -151,7 +151,8 @@
         "expectation_missing",
         "bad_data",
         "method_unavailable",
-        "api_error"
+        "api_error",
+        "engine_error"
       ],
       "title": "Reason",
       "type": "string"
