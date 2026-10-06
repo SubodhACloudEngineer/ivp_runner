@@ -1,4 +1,4 @@
-"""Write a RunResult into the customer MOP workbook.
+"""Write result records into the customer MOP workbook.
 
 Reads the source workbook (normally under reference/) and writes a patched
 copy (normally under out/). The source is never opened for writing.
@@ -6,12 +6,15 @@ copy (normally under out/). The source is never opened for writing.
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-from ivp_runner.results import CheckResult, RunResult, Verdict, rollup
+from ivp_runner.catalogue import Catalogue
+from ivp_runner.results import TestResult, Verdict, rollup
 from ivp_runner.xlsx_patch import PatchError, patch_cells, read_cell_texts
 
 MARKER = "ivp-runner"  # first word of every summary cell this tool writes
@@ -69,27 +72,35 @@ def load_mapping(path: str | Path) -> MopMapping:
     )
 
 
-def render_cells(mapping: MopMapping, run: RunResult) -> dict[str, str]:
-    """Cell ref -> text for every mapped row. Pure; touches no files."""
-    by_id = {c.test_id: c for c in run.checks}
+def render_cells(
+    mapping: MopMapping, results: Sequence[TestResult], catalogue: Catalogue
+) -> dict[str, str]:
+    """Cell ref -> text for every mapped row that has results. Pure; touches no files."""
+    by_test: dict[str, list[TestResult]] = {}
+    for r in results:
+        by_test.setdefault(r.test_id, []).append(r)
     cells: dict[str, str] = {}
     for rm in mapping.rows:
-        checks = [by_id[t] for t in rm.test_ids if t in by_id]
-        if not checks:
+        present = [t for t in rm.test_ids if t in by_test]
+        if not present:
             continue
-        verdict = rollup(c.verdict for c in checks)
+        verdict = rollup(rollup(r.verdict for r in by_test[t]) for t in present)
         cells[f"{mapping.status_column}{rm.row}"] = mapping.verdict_to_status[verdict]
-        cells[f"{mapping.summary_column}{rm.row}"] = _summary(run, checks)
+        cells[f"{mapping.summary_column}{rm.row}"] = _summary(present, by_test, catalogue)
     return cells
 
 
 def write_results(
-    mapping: MopMapping, run: RunResult, src: str | Path, dst: str | Path
+    mapping: MopMapping,
+    results: Sequence[TestResult],
+    catalogue: Catalogue,
+    src: str | Path,
+    dst: str | Path,
 ) -> dict[str, str]:
     """Validate the template, then write the patched copy to ``dst``. Returns the cells written."""
-    cells = render_cells(mapping, run)
+    cells = render_cells(mapping, results, catalogue)
     if not cells:
-        raise PatchError("no mapped checks in this run; nothing to write")
+        raise PatchError("no mapped checks in these results; nothing to write")
     rows = sorted({int(ref[len(mapping.status_column) :]) for ref in cells})
     desc_refs = [f"{mapping.description_column}{r}" for r in rows]
     summary_refs = [f"{mapping.summary_column}{r}" for r in rows]
@@ -113,25 +124,32 @@ def write_results(
     return cells
 
 
-def _summary(run: RunResult, checks: list[CheckResult]) -> str:
-    lines = [f"{MARKER} {run.finished_at.utc} ({run.finished_at.local} {run.finished_at.tz})"]
-    for c in checks:
-        counts = ", ".join(f"{n} {v}" for v, n in c.counts.items() if n)
-        lines.append(f"{c.test_id} {c.verdict.value}: {c.title} [{counts}]")
-        for verdict in (Verdict.FAIL, Verdict.ERROR, Verdict.INCONCLUSIVE):
-            by_reason: dict[str, list[str]] = {}
-            for d in c.devices:
-                if d.verdict is verdict:
-                    by_reason.setdefault(d.reason.value, []).append(d.device.name)
-            for reason, names in by_reason.items():
-                shown = ", ".join(names[:MAX_DEVICES_LISTED])
-                more = (
-                    f" +{len(names) - MAX_DEVICES_LISTED} more"
-                    if len(names) > MAX_DEVICES_LISTED
-                    else ""
+def _summary(
+    test_ids: list[str], by_test: dict[str, list[TestResult]], catalogue: Catalogue
+) -> str:
+    latest = max((r for t in test_ids for r in by_test[t]), key=lambda r: r.timestamp_utc)
+    lines = [f"{MARKER} {latest.timestamp_utc} ({latest.timestamp_local} {latest.timezone})"]
+    for t in test_ids:
+        records = by_test[t]
+        check = catalogue.get(t)
+        verdict = rollup(r.verdict for r in records)
+        counts = Counter(r.verdict for r in records)
+        shown = ", ".join(f"{counts[v]} {v.value}" for v in Verdict if counts[v])
+        lines.append(f"{t} {verdict.value}: {check.title} [{shown}]")
+        for v in (Verdict.FAIL, Verdict.ERROR):
+            groups: dict[str, list[str]] = {}
+            for r in records:
+                if r.verdict is v:
+                    name = r.device.name or r.device.id if r.device else "site-wide"
+                    groups.setdefault(r.reason.value, []).append(name)
+            for reason, names in groups.items():
+                more = len(names) - MAX_DEVICES_LISTED
+                tail = f" +{more} more" if more > 0 else ""
+                lines.append(
+                    f"  {v.value} ({reason}): {', '.join(names[:MAX_DEVICES_LISTED])}{tail}"
                 )
-                lines.append(f"  {verdict.value} ({reason}): {shown}{more}")
-        if c.coverage == "partial" and c.limitation:
-            lines.append(f"  Partial check: {c.limitation.split('. ')[0].rstrip('.')}.")
-    lines.append(f"Full results: run {run.run_id}")
+        if check.coverage == "partial" and check.limitation:
+            first = " ".join(check.limitation.split()).split(". ")[0].rstrip(".")
+            lines.append(f"  Partial check: {first}.")
+    lines.append(f"Full results: run {latest.run_id}")
     return "\n".join(lines)

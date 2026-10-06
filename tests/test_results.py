@@ -2,115 +2,114 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
-from ivp_runner.results import (
-    CheckResult,
-    DeviceRef,
-    DeviceResult,
-    Reason,
-    RunResult,
-    SiteRef,
-    Timestamp,
-    Verdict,
-    rollup,
+from ivp_runner import schemas
+from ivp_runner.results import Reason, TestResult, Verdict, rollup, timestamps
+
+
+def record(**overrides):
+    base = {
+        "run_id": "run-1",
+        "test_id": "AP-02",
+        "site": {"id": "s", "name": "Site", "class": "large"},
+        "device": {"id": "d1", "name": "AP-TEST-1"},
+        "timestamp_utc": "2026-07-01T10:00:00Z",
+        "timestamp_local": "2026-07-01T12:00:00+02:00",
+        "timezone": "Europe/Madrid",
+        "method": "mist_api",
+        "expected": {"power_constrained": False},
+        "actual": {"power_constrained": False},
+        "verdict": "PASS",
+        "evidence_path": "out/run-1/evidence/AP-02/d1.json",
+        "raw_ref": [{"path": "out/run-1/raw/x.json", "sha256": "a" * 64, "pointer": "/0"}],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_verdicts_are_exactly_four():
+    assert {v.value for v in Verdict} == {"PASS", "FAIL", "SKIP", "ERROR"}
+    with pytest.raises(ValidationError):
+        TestResult.model_validate(record(verdict="INCONCLUSIVE", reason="counter_reset"))
+
+
+@pytest.mark.parametrize(
+    "verdict, reason, ok",
+    [
+        ("PASS", None, True),
+        ("PASS", "criteria_not_met", False),
+        ("FAIL", None, False),
+        ("FAIL", "criteria_not_met", True),
+        ("FAIL", "field_missing", False),  # a missing field is never a FAIL
+        ("SKIP", "precondition_failed", True),
+        ("ERROR", "counter_reset", True),
+        ("ERROR", "criteria_not_met", False),  # ERROR is never a disguised FAIL
+    ],
 )
-
-DEV = DeviceRef(id="d1", name="AP-TEST-1", mac="000000000001", model="TEST")
-DEV2 = DeviceRef(id="d2", name="AP-TEST-2", mac="000000000002", model="TEST")
-
-
-def ok(dev=DEV):
-    return DeviceResult(dev, Verdict.PASS)
-
-
-def bad(verdict, reason, dev=DEV):
-    return DeviceResult(dev, verdict, reason)
+def test_reason_must_match_verdict(verdict, reason, ok):
+    data = record(verdict=verdict, reason=reason)
+    if ok:
+        TestResult.model_validate(data)
+    else:
+        with pytest.raises(ValidationError):
+            TestResult.model_validate(data)
 
 
-def test_timestamp_keeps_utc_and_site_local():
-    ts = Timestamp.from_datetime(datetime(2026, 7, 1, 10, 0, tzinfo=UTC), "Europe/Madrid")
-    assert ts.utc == "2026-07-01T10:00:00Z"
-    assert ts.local == "2026-07-01T12:00:00+02:00"
-    assert ts.tz == "Europe/Madrid"
+def test_device_may_be_null_only_for_site_wide_error():
+    TestResult.model_validate(record(device=None, verdict="ERROR", reason="api_error"))
+    with pytest.raises(ValidationError, match="site-wide ERROR"):
+        TestResult.model_validate(record(device=None))
 
 
-def test_timestamp_rejects_naive_datetime():
+def test_unknown_keys_and_bad_formats_rejected():
+    for bad in (
+        record(extra=1),
+        record(timestamp_utc="2026-07-01 10:00"),
+        record(method="snmp"),
+        record(raw_ref=[{"path": "x", "sha256": "nothex", "pointer": "/0"}]),
+    ):
+        with pytest.raises(ValidationError):
+            TestResult.model_validate(bad)
+
+
+def test_json_round_trip_uses_class_alias():
+    r = TestResult.model_validate(record())
+    dumped = json.loads(r.model_dump_json(by_alias=True))
+    assert dumped["site"]["class"] == "large"
+    assert TestResult.model_validate(dumped) == r
+
+
+def test_timestamps_utc_and_site_local():
+    utc, local = timestamps(datetime(2026, 1, 15, 9, 30, tzinfo=UTC), "Europe/Madrid")
+    assert (utc, local) == ("2026-01-15T09:30:00Z", "2026-01-15T10:30:00+01:00")
     with pytest.raises(ValueError, match="naive"):
-        Timestamp.from_datetime(datetime(2026, 7, 1, 10, 0), "Europe/Madrid")
-
-
-def test_pass_has_no_reason_and_others_require_one():
-    with pytest.raises(ValueError):
-        DeviceResult(DEV, Verdict.PASS, Reason.CRITERIA_NOT_MET)
-    with pytest.raises(ValueError):
-        DeviceResult(DEV, Verdict.SKIP)
+        timestamps(datetime(2026, 1, 15, 9, 30), "Europe/Madrid")
 
 
 @pytest.mark.parametrize(
     "verdicts, expected",
     [
-        ([Verdict.PASS, Verdict.PASS], Verdict.PASS),
-        ([Verdict.PASS, Verdict.SKIP], Verdict.PASS),
-        ([Verdict.SKIP, Verdict.SKIP], Verdict.SKIP),
-        ([Verdict.PASS, Verdict.INCONCLUSIVE], Verdict.INCONCLUSIVE),
-        ([Verdict.ERROR, Verdict.INCONCLUSIVE], Verdict.ERROR),
-        ([Verdict.ERROR, Verdict.FAIL, Verdict.PASS], Verdict.FAIL),
-        ([], Verdict.ERROR),
+        (["PASS", "SKIP"], "PASS"),
+        (["SKIP"], "SKIP"),
+        (["PASS", "ERROR"], "ERROR"),
+        (["ERROR", "FAIL"], "FAIL"),
+        ([], "ERROR"),
     ],
 )
-def test_rollup_precedence(verdicts, expected):
-    assert rollup(verdicts) is expected
+def test_rollup(verdicts, expected):
+    assert rollup(Verdict(v) for v in verdicts) is Verdict(expected)
 
 
-def test_disconnected_ap_shape_one_fail_four_skips():
-    """A device failing AP-00 appears as FAIL there and SKIP in AP-01..05."""
-    checks = [
-        CheckResult(
-            "AP-00", "t", "full", None, (ok(DEV), bad(Verdict.FAIL, Reason.CRITERIA_NOT_MET, DEV2))
-        ),
-    ] + [
-        CheckResult(
-            t, "t", "full", None, (ok(DEV), bad(Verdict.SKIP, Reason.PRECONDITION_FAILED, DEV2))
-        )
-        for t in ("AP-01", "AP-02", "AP-03", "AP-04", "AP-05")
-    ]
-    dev2 = [d.verdict for c in checks for d in c.devices if d.device is DEV2]
-    assert dev2.count(Verdict.FAIL) == 1 and dev2.count(Verdict.SKIP) == 5
-    assert checks[0].verdict is Verdict.FAIL
-    assert checks[1].verdict is Verdict.PASS and checks[1].counts["SKIP"] == 1
-
-
-def test_run_result_serialises_to_json():
-    ts = Timestamp.from_epoch(0, "Europe/Madrid")
-    run = RunResult(
-        run_id="r1",
-        tool_version="0.1.0",
-        org_id="o",
-        api_host="api.example",
-        site=SiteRef("s", "Site", "Europe/Madrid"),
-        catalogue_path="catalogue/ap.yaml",
-        catalogue_sha256="0" * 64,
-        started_at=ts,
-        finished_at=ts,
-        checks=(
-            CheckResult(
-                "AP-05",
-                "t",
-                "partial",
-                "RX only",
-                (
-                    DeviceResult(
-                        DEV,
-                        Verdict.INCONCLUSIVE,
-                        Reason.COUNTER_RESET,
-                        evidence={"port_stat.eth0.rx_errors": {"start": 9, "end": 2}},
-                    ),
-                ),
-            ),
-        ),
+@pytest.mark.parametrize("name", sorted(schemas.MODELS))
+def test_committed_json_schemas_match_models(name):
+    path = schemas.SCHEMA_DIR / f"{name}.schema.json"
+    assert path.read_text(encoding="utf-8") == schemas.render(schemas.MODELS[name]), (
+        f"{path} is stale: run `python -m ivp_runner.schemas`"
     )
-    out = json.loads(json.dumps(run.to_dict()))
-    check = out["checks"][0]
-    assert check["verdict"] == "INCONCLUSIVE"
-    assert check["devices"][0]["reason"] == "counter_reset"
-    assert out["started_at"]["utc"] == "1970-01-01T00:00:00Z"
+
+
+def test_result_schema_lists_exactly_four_verdicts():
+    schema = json.loads((schemas.SCHEMA_DIR / "result.schema.json").read_text())
+    assert sorted(schema["$defs"]["Verdict"]["enum"]) == ["ERROR", "FAIL", "PASS", "SKIP"]
+    assert set(schema["$defs"]["Reason"]["enum"]) == {r.value for r in Reason}

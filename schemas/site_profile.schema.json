@@ -1,0 +1,144 @@
+{
+  "$defs": {
+    "Expectations": {
+      "additionalProperties": false,
+      "properties": {
+        "dns_servers": {
+          "anyOf": [
+            {
+              "items": {
+                "format": "ipvanyaddress",
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dns Servers"
+        },
+        "mgmt_subnet": {
+          "anyOf": [
+            {
+              "format": "ipvanynetwork",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mgmt Subnet"
+        },
+        "min_uplink_speed_mbps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Uplink Speed Mbps"
+        },
+        "ssids": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ExpectedSsid"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ssids"
+        },
+        "uplink_port": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uplink Port"
+        }
+      },
+      "title": "Expectations",
+      "type": "object"
+    },
+    "ExpectedSsid": {
+      "additionalProperties": false,
+      "properties": {
+        "bands": {
+          "items": {
+            "enum": [
+              "24",
+              "5",
+              "6"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Bands",
+          "type": "array"
+        },
+        "ssid": {
+          "minLength": 1,
+          "title": "Ssid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ssid",
+        "bands"
+      ],
+      "title": "ExpectedSsid",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "expectations": {
+      "$ref": "#/$defs/Expectations"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "site_class": {
+      "enum": [
+        "small",
+        "medium",
+        "large"
+      ],
+      "title": "Site Class",
+      "type": "string"
+    },
+    "site_id": {
+      "minLength": 1,
+      "title": "Site Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "site_id",
+    "site_class",
+    "expectations"
+  ],
+  "title": "SiteProfile",
+  "type": "object"
+}

@@ -1,0 +1,320 @@
+{
+  "$defs": {
+    "AssertionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "default": null,
+          "title": "Actual"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "title": "Message",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "ERROR"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "rule",
+        "verdict"
+      ],
+      "title": "AssertionResult",
+      "type": "object"
+    },
+    "DeviceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "mac": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mac"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "DeviceRef",
+      "type": "object"
+    },
+    "RawRef": {
+      "additionalProperties": false,
+      "description": "Where the device's raw data lives: a saved payload file plus a JSON pointer into it.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "pointer": {
+          "pattern": "^(/[^/]*)*$",
+          "title": "Pointer",
+          "type": "string"
+        },
+        "sample": {
+          "default": "once",
+          "enum": [
+            "once",
+            "start",
+            "end"
+          ],
+          "title": "Sample",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "pointer"
+      ],
+      "title": "RawRef",
+      "type": "object"
+    },
+    "Reason": {
+      "description": "Machine-readable cause, required for every verdict except PASS.",
+      "enum": [
+        "criteria_not_met",
+        "precondition_failed",
+        "counter_reset",
+        "sample_missing",
+        "field_missing",
+        "expectation_missing",
+        "bad_data",
+        "method_unavailable",
+        "api_error"
+      ],
+      "title": "Reason",
+      "type": "string"
+    },
+    "SiteRef": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "enum": [
+            "small",
+            "medium",
+            "large"
+          ],
+          "title": "Class",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "class"
+      ],
+      "title": "SiteRef",
+      "type": "object"
+    },
+    "Verdict": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SKIP",
+        "ERROR"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "actual": {
+      "additionalProperties": true,
+      "title": "Actual",
+      "type": "object"
+    },
+    "assertions": {
+      "items": {
+        "$ref": "#/$defs/AssertionResult"
+      },
+      "title": "Assertions",
+      "type": "array"
+    },
+    "device": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeviceRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Path"
+    },
+    "expected": {
+      "additionalProperties": true,
+      "title": "Expected",
+      "type": "object"
+    },
+    "message": {
+      "default": "",
+      "title": "Message",
+      "type": "string"
+    },
+    "method": {
+      "enum": [
+        "mist_api",
+        "ssh",
+        "probe"
+      ],
+      "title": "Method",
+      "type": "string"
+    },
+    "raw_ref": {
+      "items": {
+        "$ref": "#/$defs/RawRef"
+      },
+      "title": "Raw Ref",
+      "type": "array"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Reason"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "site": {
+      "$ref": "#/$defs/SiteRef"
+    },
+    "test_id": {
+      "pattern": "^[A-Z]{2,}-\\d{2}$",
+      "title": "Test Id",
+      "type": "string"
+    },
+    "timestamp_local": {
+      "title": "Timestamp Local",
+      "type": "string"
+    },
+    "timestamp_utc": {
+      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ$",
+      "title": "Timestamp Utc",
+      "type": "string"
+    },
+    "timezone": {
+      "title": "Timezone",
+      "type": "string"
+    },
+    "verdict": {
+      "$ref": "#/$defs/Verdict"
+    }
+  },
+  "required": [
+    "run_id",
+    "test_id",
+    "site",
+    "device",
+    "timestamp_utc",
+    "timestamp_local",
+    "timezone",
+    "method",
+    "verdict"
+  ],
+  "title": "TestResult",
+  "type": "object"
+}

@@ -1,12 +1,20 @@
 import copy
-from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from ivp_runner.catalogue import CatalogueError, load_catalogue, parse_catalogue
+from ivp_runner.catalogue import (
+    Catalogue,
+    explain,
+    inventory_paths,
+    load_catalogue,
+    unknown_field_paths,
+)
+from ivp_runner.criteria import describe
+from ivp_runner.site_profile import MissingExpectation, load_site_profile
 
-CATALOGUE = Path(__file__).resolve().parent.parent / "catalogue" / "ap.yaml"
+from .factories import CATALOGUE, ROOT, profile
 
 
 @pytest.fixture
@@ -14,70 +22,139 @@ def raw():
     return yaml.safe_load(CATALOGUE.read_text(encoding="utf-8"))
 
 
-def test_shipped_catalogue_loads():
+def test_shipped_catalogue_loads_in_dependency_order():
     cat = load_catalogue(CATALOGUE)
-    assert [c.id for c in cat.checks] == ["AP-00", "AP-01", "AP-02", "AP-03", "AP-04", "AP-05"]
-    assert cat.uplink_port == "eth0"
+    assert [c.test_id for c in cat.ordered()] == [f"AP-0{i}" for i in range(6)]
+    assert all(c.requires == ["AP-00"] for c in cat.checks[1:])
 
 
-def test_ap00_gates_every_other_ap_check():
+def test_every_field_path_is_in_the_inventory():
+    inventory = inventory_paths((ROOT / "docs" / "field_inventory.md").read_text(encoding="utf-8"))
+    assert len(inventory) > 30
+    assert unknown_field_paths(load_catalogue(CATALOGUE), inventory) == {}
+
+
+def test_partial_checks_and_mop_descriptions():
     cat = load_catalogue(CATALOGUE)
-    for test_id in ("AP-01", "AP-02", "AP-03", "AP-04", "AP-05"):
-        assert cat.preconditions_of(test_id) == ("AP-00",)
-    assert cat.preconditions_of("AP-00") == ()
+    assert {c.test_id for c in cat.checks if c.coverage == "partial"} == {"AP-01", "AP-03", "AP-05"}
+    assert all(c.mop.section == "Verify AP" for c in cat.checks)
+    assert cat.get("AP-02").mop.description == "Check the Power mode:"
 
 
-def test_partial_checks_carry_a_limitation():
-    cat = load_catalogue(CATALOGUE)
-    partial = {c.id for c in cat.checks if c.coverage == "partial"}
-    assert partial == {"AP-01", "AP-03", "AP-05"}
-    assert all(cat.get(i).limitation for i in partial)
-
-
-def test_ap03_names_say_subnet_and_dns_configuration():
-    ap03 = load_catalogue(CATALOGUE).get("AP-03")
-    names = [a.name for a in ap03.assertions]
-    assert names == ["mgmt_ip_in_expected_subnet", "dns_servers_match_expected_configuration"]
-    assert "vlan" not in ap03.title.lower()
-    assert "client probe" in ap03.limitation
-
-
-def test_unset_expectations_are_reported_per_check():
-    cat = load_catalogue(CATALOGUE)
-    assert cat.missing_expectations("AP-02") == ()
-    assert cat.missing_expectations("AP-03") == ("mgmt_subnet", "dns_servers")
-
-
-def test_expectations_parse(raw):
-    raw["expectations"] = {
-        "ssids": [{"ssid": "A", "bands": ["24", "5"]}, {"ssid": "B", "bands": ["5", "6"]}],
-        "mgmt_subnet": "192.0.2.0/24",
-        "dns_servers": ["192.0.2.53", "198.51.100.53"],
-        "min_uplink_speed_mbps": 1000,
-    }
-    exp = parse_catalogue(raw).expectations
-    assert exp.ssid_count_per_band() == {"band_24": 1, "band_5": 2, "band_6": 1}
-    assert str(exp.mgmt_subnet) == "192.0.2.0/24"
-    assert exp.dns_servers == {"198.51.100.53", "192.0.2.53"}
-
-
-@pytest.mark.parametrize(
-    "mutate, message",
-    [
-        (lambda r: r["checks"].append(copy.deepcopy(r["checks"][1])), "duplicate test IDs"),
-        (lambda r: r["checks"][1].update(id="AP1"), "does not match"),
-        (lambda r: r["checks"][1].pop("limitation"), "partial coverage requires a limitation"),
-        (lambda r: r["checks"][0].update(precondition_for=["AP-99"]), "unknown test IDs"),
-        (lambda r: r["checks"][1].update(surprise=1), "unknown keys"),
-        (lambda r: r["checks"][2].update(uses_expectations=["vlan"]), "unknown keys"),
-        (lambda r: r["expectations"].update(mgmt_subnet="10.0.0.1/33"), "mgmt_subnet"),
-        (lambda r: r["expectations"].update(dns_servers=["dns.example"]), "not an IP"),
-        (lambda r: r["expectations"].update(ssids=[{"ssid": "A", "bands": ["7"]}]), "bands"),
-        (lambda r: r["expectations"].update(min_uplink_speed_mbps=True), "positive int"),
-        (lambda r: r.update(schema_version=2), "schema_version"),
+# The sentences a reviewer signs off. Changing a criterion must change these.
+EXPECTED_RULES = {
+    "AP-00": [
+        'status equals "connected"',
+        "radio_stat is reported",
+        "power_constrained is reported",
+        "ip_stat.ip is reported",
+        "ip_stat.netmask is reported",
+        "ip_stat.dns is reported",
+        "port_stat.<port>.up is reported",
+        "port_stat.<port>.rx_errors is reported",
+        "uptime is reported",
     ],
-)
+    "AP-01": [
+        "For each band in radio_stat (ignoring any where disabled equals true):",
+        "  radio_stat.<band>.num_wlans equals the site's expected ssid_count.<band>",
+        "  at least 1 band(s) must be checked",
+    ],
+    "AP-02": ["power_constrained equals false"],
+    "AP-03": [
+        "ip_stat.ip is an address inside the site's expected mgmt_subnet",
+        "ip_stat.dns contains exactly the same entries as the site's expected dns_servers"
+        " (any order)",
+    ],
+    "AP-04": [
+        "port_stat.<port>.up equals true",
+        "port_stat.<port>.speed is at least the site's expected min_uplink_speed_mbps",
+        "port_stat.<port>.full_duplex equals true",
+    ],
+    "AP-05": [
+        "port_stat.<port>.rx_errors is the same at run start and run end "
+        "(if uptime went down, the device rebooted: ERROR, not PASS)"
+    ],
+}
+
+
+@pytest.mark.parametrize("test_id", sorted(EXPECTED_RULES))
+def test_criteria_render_as_reviewed_sentences(test_id):
+    assert describe(load_catalogue(CATALOGUE).get(test_id).pass_when) == EXPECTED_RULES[test_id]
+
+
+def test_explain_mentions_limitations_and_preconditions():
+    text = explain(load_catalogue(CATALOGUE))
+    assert "Only if PASS: AP-00 (otherwise SKIP)" in text
+    assert "not proof that DNS works" in text
+
+
+def test_adding_a_check_is_yaml_only(raw):
+    raw["checks"].append(
+        {
+            "test_id": "AP-06",
+            "title": "AP uplink has an LLDP neighbour",
+            "mop": {"section": "Verify AP", "description": "new row"},
+            "site_classes": ["large"],
+            "coverage": "full",
+            "requires": ["AP-00"],
+            "collect": {"method": "mist_api", "source": "site_device_stats"},
+            "target": {"kind": "ap", "select": {"field": "type", "equals": "ap"}},
+            "pass_when": {"all": [{"field": "lldp_stat.system_name", "present": True}]},
+        }
+    )
+    cat = Catalogue.model_validate(raw)
+    assert cat.ordered()[-1].test_id == "AP-06"
+
+
+def _mutations():
+    def check(i):
+        return lambda r: r["checks"][i]
+
+    return [
+        (lambda r: r["checks"].append(copy.deepcopy(r["checks"][1])), "duplicate test IDs"),
+        (lambda r: check(1)(r).update(test_id="AP1"), "test_id"),
+        (lambda r: check(1)(r).pop("limitation"), "partial coverage requires a limitation"),
+        (lambda r: check(1)(r).update(requires=["AP-99"]), "unknown test IDs"),
+        (lambda r: check(0)(r).update(requires=["AP-02"]), "requires cycle"),
+        (lambda r: check(1)(r).update(surprise=1), "Extra inputs"),
+        (lambda r: check(2)(r).update(site_classes=["huge"]), "site_classes"),
+        (lambda r: check(2)(r).update(site_classes=["all", "large"]), "'all' cannot be combined"),
+        (lambda r: check(2)(r).update(collect={"method": "snmp", "source": "x"}), "method"),
+        (
+            lambda r: check(2)(r)["pass_when"]["all"].__setitem__(0, {"field": "x", "greater": 1}),
+            "pass_when",
+        ),
+        (
+            lambda r: check(2)(r)["pass_when"]["all"].__setitem__(
+                0, {"field": "x", "equals": 1, "at_least": 1}
+            ),
+            "exactly one operator",
+        ),
+        (lambda r: check(5)(r)["collect"].update(sampling="once"), "unchanged_during_run requires"),
+        (lambda r: check(4)(r).pop("vars"), "placeholders without a var"),
+        (lambda r: r.update(schema_version=1), "schema_version"),
+    ]
+
+
+@pytest.mark.parametrize("mutate, message", _mutations())
 def test_malformed_catalogue_is_rejected(raw, mutate, message):
     mutate(raw)
-    with pytest.raises(CatalogueError, match=message):
-        parse_catalogue(raw)
+    with pytest.raises(ValidationError, match=message):
+        Catalogue.model_validate(raw)
+
+
+def test_example_site_profile_and_derived_counts():
+    p = load_site_profile(ROOT / "sites" / "example.yaml")
+    assert [p.lookup(f"ssid_count.band_{b}") for b in ("24", "5", "6")] == [1, 2, 1]
+    assert p.lookup("dns_servers") == ["192.0.2.53", "198.51.100.53"]
+
+
+def test_site_profile_missing_and_invalid_values():
+    with pytest.raises(MissingExpectation):
+        profile(mgmt_subnet=None).lookup("mgmt_subnet")
+    with pytest.raises(MissingExpectation):
+        profile(ssids=None).lookup("ssid_count.band_5")
+    with pytest.raises(ValidationError):
+        profile(dns_servers=["dns.example"])
+    with pytest.raises(ValidationError):
+        profile(min_uplink_speed_mbps=0)
