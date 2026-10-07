@@ -3,6 +3,10 @@
     ivp run --site <site-id> --org <org-id> --api-host api.eu.mist.com \\
             --catalogue catalogue/ap.yaml --mop reference/MOP_sample.xlsx --out out/
 
+``--dry-run`` collects and evaluates as usual (results.json, raw data and
+evidence are still written) but writes no workbook; ``--mop`` is then
+optional and, if given, only checked.
+
 Fully non-interactive. Progress goes to stderr; stdout carries only the
 summary table, or with --json only results.json, so a calling process can
 parse it. Exit codes are listed in ivp_runner.runner.
@@ -40,27 +44,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mist API host, e.g. api.mist.com or api.eu.mist.com (no default on purpose)",
     )
     r.add_argument("--catalogue", required=True, type=Path)
-    r.add_argument("--mop", required=True, type=Path, help="reference workbook (read only)")
+    r.add_argument(
+        "--mop", type=Path, help="reference workbook (read only); optional with --dry-run"
+    )
     r.add_argument("--out", required=True, type=Path, help="parent folder for run folders")
     r.add_argument("--profile", type=Path, help="site profile (default: sites/<site-id>.yaml)")
     r.add_argument("--mapping", type=Path, default=Path("catalogue/mop_mapping.yaml"))
     r.add_argument("--json", action="store_true", help="print results.json to stdout, no table")
+    r.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="collect and evaluate, but write no workbook",
+    )
     return p
 
 
 def main(argv: list[str] | None = None, *, _session: Any = None, _sleep: Any = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.mop is None and not args.dry_run:
+        parser.error("--mop is required (or use --dry-run to skip the workbook)")
     cfg = RunConfig(
-        site_id=args.site,
-        org_id=args.org,
+        site_id=args.site.strip(),
+        org_id=args.org.strip(),
         api_host=args.api_host,
         catalogue=args.catalogue,
         mop=args.mop,
         out=args.out,
-        profile=args.profile or Path("sites") / f"{args.site}.yaml",
+        profile=args.profile or Path("sites") / f"{args.site.strip()}.yaml",
         mapping=args.mapping,
+        dry_run=args.dry_run,
     )
-    outcome = run(cfg, session=_session, sleep=_sleep, stderr=sys.stderr)
+    try:
+        outcome = run(cfg, session=_session, sleep=_sleep, stderr=sys.stderr)
+    except OSError as e:  # the run folder itself could not be created
+        sys.stdout.write(
+            _failure_block(
+                f"cannot create a run folder under --out {cfg.out}: {e.strerror or e}",
+                "Choose a folder you can write to, e.g. --out out/",
+            )
+        )
+        return EXIT_TOOL
+    except KeyboardInterrupt:
+        sys.stderr.write("ivp: interrupted; nothing further written\n")
+        return EXIT_TOOL
     if args.json:
         sys.stdout.write(outcome.results_path.read_text(encoding="utf-8"))
     else:
@@ -68,7 +95,20 @@ def main(argv: list[str] | None = None, *, _session: Any = None, _sleep: Any = N
     return outcome.exit_code
 
 
+def _failure_block(problem: str, fix: str | None) -> str:
+    out = ["", "RUN FAILED - the checks were not completed.", f"  Problem:    {problem}"]
+    if fix:
+        out.append(f"  What to do: {fix}")
+    return "\n".join(out) + "\n\n"
+
+
 def summary_table(outcome: RunOutcome) -> str:
+    if outcome.tool_error and not outcome.results:
+        return (
+            _failure_block(outcome.tool_error, outcome.tool_fix)
+            + f"run folder: {outcome.run_dir} (run.log has the details)\n"
+            + f"exit code:  {outcome.exit_code}\n"
+        )
     rows = sorted(
         (
             r.test_id,
@@ -97,10 +137,21 @@ def summary_table(outcome: RunOutcome) -> str:
         + (", ".join(f"{totals[v]} {v.value}" for v in Verdict if totals[v]) or "no results")
     )
     out.append("")
+    if outcome.problems:
+        out.append("Some data could not be collected; checks that needed it are ERROR (api_error):")
+        for problem, fix in outcome.problems:
+            out.append(f"  Problem:    {problem}")
+            if fix:
+                out.append(f"  What to do: {fix}")
+        out.append("")
     if outcome.tool_error:
-        out.append(f"RUN INCOMPLETE: {outcome.tool_error}")
+        out.append(_failure_block(outcome.tool_error, outcome.tool_fix).strip("\n"))
+        out.append("")
     out.append(f"run folder: {outcome.run_dir}")
-    out.append(f"workbook:   {outcome.workbook or '(not written)'}")
+    if outcome.dry_run:
+        out.append("workbook:   (dry run - not written)")
+    else:
+        out.append(f"workbook:   {outcome.workbook or '(not written)'}")
     out.append(f"exit code:  {outcome.exit_code}")
     return "\n".join(out) + "\n"
 

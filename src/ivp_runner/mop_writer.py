@@ -127,30 +127,41 @@ def write_results(
     cells = render_cells(mapping, results, catalogue)
     if not cells:
         raise PatchError("no mapped checks in these results; nothing to write")
-    rows = sorted({int(ref[len(mapping.status_column) :]) for ref in cells})
+    for ref in check_template(mapping, src):
+        cells[ref] = ""  # text from an earlier ivp-runner version; the picture replaces it
+
+    pictures = render_pictures(mapping, results, catalogue)
+    patch_workbook(src, dst, mapping.sheet, cells, pictures)
+    return WriteReport(cells=cells, pictures=[p.cell for p in pictures])
+
+
+def check_template(mapping: MopMapping, src: str | Path) -> list[str]:
+    """Refuse (PatchError) a workbook whose mapped rows don't match the mapping.
+
+    Every mapped row's description must start with ``expect_description``, and
+    its evidence cell must be empty or hold text this tool wrote. Returns the
+    evidence cells holding our old text, which the caller clears. Read-only.
+    """
+    rows = [rm.row for rm in mapping.rows]
     desc_refs = [f"{mapping.description_column}{r}" for r in rows]
     evidence_refs = [f"{mapping.evidence_column}{r}" for r in rows]
     existing = read_cell_texts(src, mapping.sheet, desc_refs + evidence_refs)
-
-    expected = {rm.row: rm.expect_description for rm in mapping.rows}
-    for r, ref in zip(rows, desc_refs, strict=True):
-        if not existing[ref].strip().startswith(expected[r]):
+    for rm, ref in zip(mapping.rows, desc_refs, strict=True):
+        if not existing[ref].strip().startswith(rm.expect_description):
             raise PatchError(
-                f"{mapping.sheet}!{ref} does not start with {expected[r]!r}; "
+                f"{mapping.sheet}!{ref} does not start with {rm.expect_description!r}; "
                 "the template layout differs from the mapping"
             )
+    ours = []
     for ref in evidence_refs:
         current = existing[ref].strip()
         if current and not current.startswith(MARKER):
             raise PatchError(
                 f"{mapping.sheet}!{ref} already holds text a human wrote; not overwriting"
             )
-        if current:  # text from an earlier ivp-runner version; the picture replaces it
-            cells[ref] = ""
-
-    pictures = render_pictures(mapping, results, catalogue)
-    patch_workbook(src, dst, mapping.sheet, cells, pictures)
-    return WriteReport(cells=cells, pictures=[p.cell for p in pictures])
+        if current:
+            ours.append(ref)
+    return ours
 
 
 def _mapped_rows(mapping: MopMapping, results: Sequence[TestResult]):

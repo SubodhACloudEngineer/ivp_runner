@@ -253,7 +253,12 @@ def main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] != "explain":
         print("usage: python -m ivp_runner.catalogue explain <catalogue.yaml>", file=sys.stderr)
         return 2
-    print(explain(load_catalogue(argv[2])))
+    try:
+        cat = load_catalogue(argv[2])
+    except (CatalogueError, ValueError, OSError) as e:
+        print(f"catalogue not valid: {e}", file=sys.stderr)
+        return 1
+    print(explain(cat))
     return 0
 
 

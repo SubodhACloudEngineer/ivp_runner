@@ -7,6 +7,7 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+import requests
 import yaml
 
 from ivp_runner.cli import main
@@ -18,6 +19,9 @@ from .fixtures_mist import FIXTURES, site_doc, stats_items
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "cli-test-token-0123456789abcdef"
+SITE1 = "00000000-0000-4000-8000-0000000000a1"
+SITE2 = "00000000-0000-4000-8000-0000000000a2"
+ORG = "00000000-0000-4000-8000-0000000000f1"
 FIXTURE_SITE = yaml.safe_load((FIXTURES / "site_profile.yaml").read_text())["site_id"]
 DESCRIPTIONS = {
     57: "Go to Access-points and select the corresponding site",
@@ -93,11 +97,13 @@ def profile_file(tmp_path, site_id, **exp):
 
 def argv(site, mop, out, profile=None, *extra):
     a = [
-        "run", "--site", site, "--org", "org-1", "--api-host", "api.example",
+        "run", "--site", site, "--org", ORG, "--api-host", "api.example",
         "--catalogue", str(ROOT / "catalogue" / "ap.yaml"),
-        "--mop", str(mop), "--out", str(out),
+        "--out", str(out),
         "--mapping", str(ROOT / "catalogue" / "mop_mapping.yaml"),
     ]  # fmt: skip
+    if mop is not None:
+        a += ["--mop", str(mop)]
     if profile:
         a += ["--profile", str(profile)]
     return a + list(extra)
@@ -161,10 +167,12 @@ def test_full_run_on_captured_fixtures(tmp_path, mop, capsys):
 
 
 def test_json_mode_emits_only_results_json(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1")
+    prof = profile_file(tmp_path, SITE1)
     items = [ap(1), ap(2, power_constrained=True)]
     code, stdout, stderr = run_cli(
-        argv("site-1", mop, tmp_path / "out", prof, "--json"), FakeMist("site-1", items), capsys
+        argv(SITE1, mop, tmp_path / "out", prof, "--json"),
+        FakeMist(SITE1, items),
+        capsys,
     )
     doc = json.loads(stdout)  # nothing but JSON on stdout
     assert code == doc["run"]["exit_code"] == 1
@@ -178,45 +186,45 @@ def test_json_mode_emits_only_results_json(tmp_path, mop, capsys):
 
 
 def test_exit_0_when_everything_passes(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1")
+    prof = profile_file(tmp_path, SITE1)
     code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", [ap(1)]), capsys
+        argv(SITE1, mop, tmp_path / "o", prof),
+        FakeMist(SITE1, [ap(1)]),
+        capsys,
     )
     assert code == 0 and "6 PASS" in stdout
 
 
 def test_exit_1_on_fail(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1")
+    prof = profile_file(tmp_path, SITE1)
     items = [ap(1, power_constrained=True)]
     assert (
-        run_cli(argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", items), capsys)[0]
+        run_cli(
+            argv(SITE1, mop, tmp_path / "o", prof),
+            FakeMist(SITE1, items),
+            capsys,
+        )[0]
         == 1
     )
 
 
 def test_exit_2_when_error_even_with_fail(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1", mgmt_subnet=None)  # AP-03 cannot be judged
+    prof = profile_file(tmp_path, SITE1, mgmt_subnet=None)  # AP-03 cannot be judged
     items = [ap(1, power_constrained=True), disconnected(9)]  # and there are FAILs
     code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", items), capsys
+        argv(SITE1, mop, tmp_path / "o", prof),
+        FakeMist(SITE1, items),
+        capsys,
     )
     assert code == 2
     assert "expectation_missing" in stdout and "criteria_not_met" in stdout
 
 
-def test_exit_2_on_api_failure(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1")
-    code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", [], status=401), capsys
-    )
-    assert code == 2 and "api_error" in stdout
-
-
 def test_exit_3_missing_token(tmp_path, mop, capsys, monkeypatch):
     monkeypatch.delenv("MIST_API_TOKEN")
-    prof = profile_file(tmp_path, "site-1")
-    fake = FakeMist("site-1", [ap(1)])
-    code, stdout, _ = run_cli(argv("site-1", mop, tmp_path / "o", prof), fake, capsys)
+    prof = profile_file(tmp_path, SITE1)
+    fake = FakeMist(SITE1, [ap(1)])
+    code, stdout, _ = run_cli(argv(SITE1, mop, tmp_path / "o", prof), fake, capsys)
     assert code == 3 and "MIST_API_TOKEN is not set" in stdout
     assert fake.calls == []
     doc = json.loads((only_run_dir(tmp_path / "o") / "results.json").read_text())
@@ -225,32 +233,21 @@ def test_exit_3_missing_token(tmp_path, mop, capsys, monkeypatch):
 
 def test_exit_3_missing_profile_points_to_template(tmp_path, mop, capsys):
     code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", tmp_path / "nope.yaml"), FakeMist("site-1", []), capsys
+        argv(SITE1, mop, tmp_path / "o", tmp_path / "nope.yaml"),
+        FakeMist(SITE1, []),
+        capsys,
     )
     assert code == 3 and "sites/TEMPLATE.yaml" in stdout
 
 
 def test_exit_3_profile_for_another_site(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-2")
+    prof = profile_file(tmp_path, SITE2)
     code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", []), capsys
+        argv(SITE1, mop, tmp_path / "o", prof),
+        FakeMist(SITE1, []),
+        capsys,
     )
-    assert code == 3 and "is for site site-2" in stdout
-
-
-def test_exit_3_when_mop_template_differs_but_results_kept(tmp_path, mop, capsys):
-    wb = openpyxl.load_workbook(mop)
-    wb["IVP Test Plan"]["B59"] = "A different MOP version"
-    wb.save(mop)
-    prof = profile_file(tmp_path, "site-1")
-    code, stdout, _ = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", [ap(1)]), capsys
-    )
-    assert code == 3 and "B59 does not start with" in stdout
-    run_dir = only_run_dir(tmp_path / "o")
-    doc = json.loads((run_dir / "results.json").read_text())
-    assert len(doc["results"]) == 6 and doc["run"]["exit_code"] == 3
-    assert list(run_dir.glob("MOP_*.xlsx")) == []
+    assert code == 3 and f"is for site {SITE2}" in stdout
 
 
 def test_exit_3_on_bad_arguments(capsys):
@@ -270,10 +267,12 @@ def test_api_host_is_required(capsys):
 
 
 def test_token_never_written_or_printed(tmp_path, mop, capsys):
-    prof = profile_file(tmp_path, "site-1")
+    prof = profile_file(tmp_path, SITE1)
     items = [ap(1, echo=TOKEN)]  # even if the API echoes it
     code, stdout, stderr = run_cli(
-        argv("site-1", mop, tmp_path / "o", prof), FakeMist("site-1", items), capsys
+        argv(SITE1, mop, tmp_path / "o", prof),
+        FakeMist(SITE1, items),
+        capsys,
     )
     assert TOKEN not in stdout + stderr
     for f in (tmp_path / "o").rglob("*"):
@@ -293,3 +292,216 @@ def test_template_profile_is_valid_once_site_id_filled(tmp_path):
     doc["site_id"] = "abc"
     p = SiteProfile.model_validate(doc)
     assert p.expectations.mgmt_subnet is None and p.expectations.uplink_port == "eth0"
+
+
+# ---------------------------------------------------------------- failure modes
+#
+# Each must print a problem and what to do, exit 3, and never show a traceback.
+
+
+def assert_legible_failure(code, stdout, stderr, problem, fix):
+    assert code == 3
+    assert "RUN FAILED" in stdout and problem in stdout and fix in stdout, stdout
+    assert "Traceback" not in stdout + stderr
+
+
+class EndSampleFails(FakeMist):
+    """Serves the start sample, then a 500 for every later stats request."""
+
+    def get(self, url, *, headers, params, timeout):
+        if url.endswith("/stats/devices") and any("stats" in c for c in self.calls):
+            self.calls.append(url)
+            return Resp(500, {"detail": "boom"})
+        return super().get(url, headers=headers, params=params, timeout=timeout)
+
+
+class Unreachable:
+    def __init__(self, exc):
+        self.exc, self.calls = exc, []
+
+    def get(self, url, **kw):
+        self.calls.append(url)
+        raise self.exc
+
+
+def test_bad_token_stops_after_one_request(tmp_path, mop, capsys):
+    fake = FakeMist(SITE1, [ap(1)], status=401)
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)), fake, capsys
+    )
+    assert_legible_failure(
+        code, stdout, stderr, "Mist rejected the API token (HTTP 401", "export MIST_API_TOKEN"
+    )
+    assert len(fake.calls) == 1  # not one 401 per source, device and check
+    doc = json.loads((only_run_dir(tmp_path / "o") / "results.json").read_text())
+    assert doc["results"] == [] and "different Mist cloud" in doc["run"]["tool_fix"]
+    assert "api_error" not in stdout
+
+
+def test_wrong_site_id(tmp_path, mop, capsys):
+    fake = FakeMist(SITE2, [ap(1)])  # the API knows another site only: 404
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)), fake, capsys
+    )
+    assert_legible_failure(
+        code, stdout, stderr, f"site {SITE1} was not found on api.example", "Check --site"
+    )
+
+
+def test_site_name_instead_of_id_is_caught_before_any_request(tmp_path, mop, capsys):
+    fake = FakeMist(SITE1, [ap(1)])
+    code, stdout, stderr = run_cli(
+        argv("Branch-Office", mop, tmp_path / "o", profile_file(tmp_path, SITE1)),
+        fake,
+        capsys,
+    )
+    assert_legible_failure(code, stdout, stderr, "is not a Mist ID", "UUIDs like")
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "exc, problem, fix",
+    [
+        (
+            requests.ConnectionError("NameResolutionError: Failed to resolve 'api.example'"),
+            "cannot resolve api.example",
+            "nslookup api.example",
+        ),
+        (requests.ConnectTimeout("timed out"), "no usable response from api.example", "curl -sI"),
+        (requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED"), "TLS", "REQUESTS_CA_BUNDLE"),
+    ],
+    ids=["dns", "timeout", "tls"],
+)
+def test_unreachable_api(tmp_path, mop, capsys, exc, problem, fix):
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)), Unreachable(exc), capsys
+    )
+    assert_legible_failure(code, stdout, stderr, problem, fix)
+
+
+def test_missing_workbook_is_caught_before_any_request(tmp_path, capsys):
+    fake = FakeMist(SITE1, [ap(1)])
+    code, stdout, stderr = run_cli(
+        argv(SITE1, tmp_path / "MOP.xlsx", tmp_path / "o", profile_file(tmp_path, SITE1)),
+        fake,
+        capsys,
+    )
+    assert_legible_failure(code, stdout, stderr, "MOP workbook not found", "Point --mop at")
+    assert fake.calls == []
+
+
+def test_workbook_that_is_not_xlsx(tmp_path, capsys):
+    bad = tmp_path / "MOP.xlsx"
+    bad.write_text("Test,Status\n", encoding="utf-8")
+    code, stdout, stderr = run_cli(
+        argv(SITE1, bad, tmp_path / "o", profile_file(tmp_path, SITE1)),
+        FakeMist(SITE1, [ap(1)]),
+        capsys,
+    )
+    assert_legible_failure(code, stdout, stderr, "is not an .xlsx workbook", ".xls or .csv")
+
+
+def test_mop_template_mismatch_is_caught_before_any_request(tmp_path, mop, capsys):
+    wb = openpyxl.load_workbook(mop)
+    wb["IVP Test Plan"]["B59"] = "A different MOP version"
+    wb.save(mop)
+    fake = FakeMist(SITE1, [ap(1)])
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)), fake, capsys
+    )
+    assert_legible_failure(
+        code, stdout, stderr, "B59 does not start with", "catalogue/mop_mapping.yaml"
+    )
+    assert fake.calls == []
+    assert list(only_run_dir(tmp_path / "o").glob("MOP_*.xlsx")) == []
+
+
+def test_partial_collection_failure_is_explained_once(tmp_path, mop, capsys):
+    """The end sample fails: only AP-05 needs it, so the run completes with exit 2."""
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)),
+        EndSampleFails(SITE1, [ap(1)]),
+        capsys,
+    )
+    assert code == 2 and "RUN FAILED" not in stdout
+    assert stdout.count("server error 500") == 1 and "Mist status page" in stdout
+    doc = json.loads((only_run_dir(tmp_path / "o") / "results.json").read_text())
+    assert [p["problem"] for p in doc["run"]["collection_problems"]] == [
+        "end site_device_stats: GET /api/v1/sites/"
+        f"{SITE1}/stats/devices: server error 500 after 6 attempts"
+    ]
+
+
+def test_internal_error_shows_no_traceback_but_logs_it(tmp_path, mop, capsys, monkeypatch):
+    import ivp_runner.runner as runner
+
+    def boom(*a, **k):
+        raise ZeroDivisionError("simulated bug")
+
+    monkeypatch.setattr(runner, "write_cards", boom)
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1)),
+        FakeMist(SITE1, [ap(1)]),
+        capsys,
+    )
+    assert_legible_failure(code, stdout, stderr, "internal error: ZeroDivisionError", "bug")
+    log = (only_run_dir(tmp_path / "o") / "run.log").read_text()
+    assert "Traceback" in log and "simulated bug" in log
+
+
+def test_unwritable_out_folder(tmp_path, mop, capsys):
+    blocker = tmp_path / "out"
+    blocker.write_text("a file, not a folder")
+    code, stdout, stderr = run_cli(
+        argv(SITE1, mop, blocker, profile_file(tmp_path, SITE1)), FakeMist(SITE1, []), capsys
+    )
+    assert_legible_failure(code, stdout, stderr, "cannot create a run folder", "--out")
+
+
+# ---------------------------------------------------------------- dry run
+
+
+def test_dry_run_evaluates_but_writes_no_workbook(tmp_path, mop, capsys):
+    before = mop.read_bytes()
+    code, stdout, _ = run_cli(
+        argv(SITE1, mop, tmp_path / "o", profile_file(tmp_path, SITE1), "--dry-run"),
+        FakeMist(SITE1, [ap(1), ap(2, power_constrained=True)]),
+        capsys,
+    )
+    assert code == 1 and "dry run - not written" in stdout
+    run_dir = only_run_dir(tmp_path / "o")
+    assert list(run_dir.glob("*.xlsx")) == [] and mop.read_bytes() == before
+    doc = json.loads((run_dir / "results.json").read_text())
+    assert doc["run"]["dry_run"] is True and doc["run"]["mop"]["output"] is None
+    assert len(doc["results"]) == 12 and len(list(run_dir.rglob("*.png"))) == 12
+    assert "dry run: workbook not written" in (run_dir / "run.log").read_text()
+
+
+def test_dry_run_needs_no_workbook(tmp_path, capsys):
+    code, stdout, _ = run_cli(
+        argv(SITE1, None, tmp_path / "o", profile_file(tmp_path, SITE1), "--dry-run"),
+        FakeMist(SITE1, [ap(1)]),
+        capsys,
+    )
+    assert code == 0 and "dry run - not written" in stdout
+
+
+def test_dry_run_still_checks_a_given_workbook(tmp_path, capsys):
+    code, stdout, stderr = run_cli(
+        argv(
+            SITE1,
+            tmp_path / "nope.xlsx",
+            tmp_path / "o",
+            profile_file(tmp_path, SITE1),
+            "--dry-run",
+        ),
+        FakeMist(SITE1, [ap(1)]),
+        capsys,
+    )
+    assert_legible_failure(code, stdout, stderr, "MOP workbook not found", "--mop")
+
+
+def test_mop_required_without_dry_run(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(argv(SITE1, None, tmp_path / "o"))
+    assert e.value.code == 3 and "--dry-run" in capsys.readouterr().err

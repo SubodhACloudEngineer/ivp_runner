@@ -157,20 +157,82 @@ def test_transient_failures_are_retried(tmp_path, first):
 
 
 @pytest.mark.parametrize(
-    "status, message",
+    "status, kind, message, fix",
     [
-        (401, "401 authentication failed"),
-        (403, "403 authentication failed or the token lacks access"),
-        (404, "404 not found; check the site id and --api-host"),
-        (400, "HTTP 400"),
+        (401, "auth", "Mist rejected the API token", "different Mist cloud"),
+        (403, "forbidden", "cannot read site site-1", "read-only (Observer)"),
+        (404, "not_found", "site site-1 was not found on api.example", "check --api-host"),
+        (400, "bad_request", "malformed", "UUID"),
     ],
 )
-def test_client_errors_are_not_retried(tmp_path, status, message):
+def test_client_errors_are_not_retried_and_say_what_to_do(tmp_path, status, kind, message, fix):
     session = FakeSession({STATS: [FakeResponse(status, b"{}")]})
     c, sleeps = collector(session)
-    with pytest.raises(CollectError, match=message):
+    with pytest.raises(CollectError, match=message) as e:
         c.fetch("site_device_stats", SITE, tmp_path, "start")
+    assert (e.value.kind, e.value.fatal) == (kind, True) and fix in e.value.fix
     assert sleeps == [] and len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "exc, kind, fix",
+    [
+        (requests.exceptions.SSLError("certificate verify failed"), "tls", "REQUESTS_CA_BUNDLE"),
+        (requests.exceptions.ProxyError("Unable to connect to proxy"), "proxy", "HTTPS_PROXY"),
+        (
+            requests.ConnectionError("NameResolutionError: Failed to resolve 'api.example'"),
+            "dns",
+            "nslookup api.example",
+        ),
+        (
+            requests.ConnectionError("[Errno 111] Connection refused"),
+            "refused",
+            "outbound tcp/443",
+        ),
+    ],
+    ids=["tls", "proxy", "dns", "refused"],
+)
+def test_network_failures_are_named_and_not_retried(tmp_path, monkeypatch, exc, kind, fix):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    c, sleeps = collector(FakeSession({SITE_PATH: [exc]}))
+    with pytest.raises(CollectError) as e:
+        c.fetch("site", SITE, tmp_path, "start")
+    assert (e.value.kind, e.value.fatal) == (kind, True)
+    assert fix in e.value.fix and sleeps == []
+
+
+def test_unreachable_api_retries_briefly_then_says_how_to_test(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@proxy.example:8080")
+    session = FakeSession({SITE_PATH: [requests.ConnectTimeout("timed out")]})
+    c, sleeps = collector(session)
+    with pytest.raises(CollectError, match="no usable response from api.example") as e:
+        c.fetch("site", SITE, tmp_path, "start")
+    assert e.value.kind == "unreachable" and len(session.calls) == 3 and sleeps == [1.0, 2.0]
+    assert "curl -sI https://api.example/api/v1/self" in e.value.fix
+    assert "HTTPS_PROXY is set" in e.value.fix and "secret" not in e.value.fix
+
+
+def test_fatal_error_stops_collection_of_other_sources(tmp_path):
+    session = FakeSession({SITE_PATH: [FakeResponse(401, b"")], STATS: [ok(stats_items())]})
+    c, _ = collector(session)
+    start = c.collect(catalogue(), "large", SITE, tmp_path, "start")
+    assert start["site"] is start["site_device_stats"]
+    assert start["site"].kind == "auth" and len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["api.eu.mist.com", "https://api.eu.mist.com", "https://api.eu.mist.com/", " api.eu.mist.com "],
+)
+def test_api_host_accepts_a_pasted_url(given):
+    assert MistApiCollector(given, token=TOKEN, session=FakeSession({}))._host == "api.eu.mist.com"
+
+
+@pytest.mark.parametrize("given", ["https://api.mist.com/api/v1", "", "api mist com"])
+def test_api_host_rejects_paths_and_junk(given):
+    with pytest.raises(CollectorConfigError, match="is not a host name"):
+        MistApiCollector(given, token=TOKEN, session=FakeSession({}))
 
 
 @pytest.mark.parametrize("body, message", [(b"<html>", "not JSON"), (b"{}", "expected a list")])
