@@ -2,11 +2,14 @@
 
 Reads the source workbook (normally under reference/) and writes a patched
 copy (normally under out/). The source is never opened for writing.
+
+Per mapped row: the rolled-up status goes into the status column, and a row
+summary card (PNG) is anchored in the evidence column. Per-device cards stay
+in the run folder's evidence/ directory.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +17,11 @@ from pathlib import Path
 import yaml
 
 from ivp_runner.catalogue import Catalogue
+from ivp_runner.evidence import render_row_card
 from ivp_runner.results import TestResult, Verdict, rollup
-from ivp_runner.xlsx_patch import PatchError, patch_cells, read_cell_texts
+from ivp_runner.xlsx_patch import PatchError, Picture, patch_workbook, read_cell_texts
 
-MARKER = "ivp-runner"  # first word of every summary cell this tool writes
-MAX_DEVICES_LISTED = 10
+MARKER = "ivp-runner"  # marks text/pictures this tool wrote
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,7 @@ class MopMapping:
     sheet: str
     description_column: str
     status_column: str
-    summary_column: str
+    evidence_column: str
     allowed_statuses: tuple[str, ...]
     verdict_to_status: dict[Verdict, str]
     rows: tuple[RowMap, ...]
@@ -65,7 +68,7 @@ def load_mapping(path: str | Path) -> MopMapping:
         sheet=raw["sheet"],
         description_column=raw["description_column"],
         status_column=raw["status_column"],
-        summary_column=raw["summary_column"],
+        evidence_column=raw["evidence_column"],
         allowed_statuses=allowed,
         verdict_to_status=v2s,
         rows=rows,
@@ -75,19 +78,36 @@ def load_mapping(path: str | Path) -> MopMapping:
 def render_cells(
     mapping: MopMapping, results: Sequence[TestResult], catalogue: Catalogue
 ) -> dict[str, str]:
-    """Cell ref -> text for every mapped row that has results. Pure; touches no files."""
-    by_test: dict[str, list[TestResult]] = {}
-    for r in results:
-        by_test.setdefault(r.test_id, []).append(r)
+    """Status cell ref -> MOP status for every mapped row that has results. Pure."""
     cells: dict[str, str] = {}
-    for rm in mapping.rows:
-        present = [t for t in rm.test_ids if t in by_test]
-        if not present:
-            continue
+    for rm, present, by_test in _mapped_rows(mapping, results):
         verdict = rollup(rollup(r.verdict for r in by_test[t]) for t in present)
         cells[f"{mapping.status_column}{rm.row}"] = mapping.verdict_to_status[verdict]
-        cells[f"{mapping.summary_column}{rm.row}"] = _summary(present, by_test, catalogue)
     return cells
+
+
+def render_pictures(
+    mapping: MopMapping, results: Sequence[TestResult], catalogue: Catalogue
+) -> list[Picture]:
+    """One row summary card per mapped row, anchored in the evidence column. Pure."""
+    pictures = []
+    for rm, present, by_test in _mapped_rows(mapping, results):
+        rows_results = [r for t in present for r in by_test[t]]
+        pictures.append(
+            Picture(
+                cell=f"{mapping.evidence_column}{rm.row}",
+                png=render_row_card(list(rm.test_ids), rows_results, catalogue),
+                name=f"{'+'.join(present)}:r{rm.row}",
+                description=f"{MARKER} evidence for {', '.join(present)}",
+            )
+        )
+    return pictures
+
+
+@dataclass(frozen=True)
+class WriteReport:
+    cells: dict[str, str]
+    pictures: list[str]  # cells that received a picture
 
 
 def write_results(
@@ -96,15 +116,21 @@ def write_results(
     catalogue: Catalogue,
     src: str | Path,
     dst: str | Path,
-) -> dict[str, str]:
-    """Validate the template, then write the patched copy to ``dst``. Returns the cells written."""
+) -> WriteReport:
+    """Validate the template, then write the patched copy to ``dst``.
+
+    Status text goes into the status column; a row summary card is anchored in
+    the evidence column. Refuses (PatchError, nothing written) if a row's
+    description doesn't match the mapping, if an evidence cell holds text a
+    human wrote, or if it already holds someone else's picture.
+    """
     cells = render_cells(mapping, results, catalogue)
     if not cells:
         raise PatchError("no mapped checks in these results; nothing to write")
     rows = sorted({int(ref[len(mapping.status_column) :]) for ref in cells})
     desc_refs = [f"{mapping.description_column}{r}" for r in rows]
-    summary_refs = [f"{mapping.summary_column}{r}" for r in rows]
-    existing = read_cell_texts(src, mapping.sheet, desc_refs + summary_refs)
+    evidence_refs = [f"{mapping.evidence_column}{r}" for r in rows]
+    existing = read_cell_texts(src, mapping.sheet, desc_refs + evidence_refs)
 
     expected = {rm.row: rm.expect_description for rm in mapping.rows}
     for r, ref in zip(rows, desc_refs, strict=True):
@@ -113,43 +139,25 @@ def write_results(
                 f"{mapping.sheet}!{ref} does not start with {expected[r]!r}; "
                 "the template layout differs from the mapping"
             )
-    for ref in summary_refs:
+    for ref in evidence_refs:
         current = existing[ref].strip()
         if current and not current.startswith(MARKER):
             raise PatchError(
                 f"{mapping.sheet}!{ref} already holds text a human wrote; not overwriting"
             )
+        if current:  # text from an earlier ivp-runner version; the picture replaces it
+            cells[ref] = ""
 
-    patch_cells(src, dst, mapping.sheet, cells)
-    return cells
+    pictures = render_pictures(mapping, results, catalogue)
+    patch_workbook(src, dst, mapping.sheet, cells, pictures)
+    return WriteReport(cells=cells, pictures=[p.cell for p in pictures])
 
 
-def _summary(
-    test_ids: list[str], by_test: dict[str, list[TestResult]], catalogue: Catalogue
-) -> str:
-    latest = max((r for t in test_ids for r in by_test[t]), key=lambda r: r.timestamp_utc)
-    lines = [f"{MARKER} {latest.timestamp_utc} ({latest.timestamp_local} {latest.timezone})"]
-    for t in test_ids:
-        records = by_test[t]
-        check = catalogue.get(t)
-        verdict = rollup(r.verdict for r in records)
-        counts = Counter(r.verdict for r in records)
-        shown = ", ".join(f"{counts[v]} {v.value}" for v in Verdict if counts[v])
-        lines.append(f"{t} {verdict.value}: {check.title} [{shown}]")
-        for v in (Verdict.FAIL, Verdict.ERROR):
-            groups: dict[str, list[str]] = {}
-            for r in records:
-                if r.verdict is v:
-                    name = r.device.name or r.device.id if r.device else "site-wide"
-                    groups.setdefault(r.reason.value, []).append(name)
-            for reason, names in groups.items():
-                more = len(names) - MAX_DEVICES_LISTED
-                tail = f" +{more} more" if more > 0 else ""
-                lines.append(
-                    f"  {v.value} ({reason}): {', '.join(names[:MAX_DEVICES_LISTED])}{tail}"
-                )
-        if check.coverage == "partial" and check.limitation:
-            first = " ".join(check.limitation.split()).split(". ")[0].rstrip(".")
-            lines.append(f"  Partial check: {first}.")
-    lines.append(f"Full results: run {latest.run_id}")
-    return "\n".join(lines)
+def _mapped_rows(mapping: MopMapping, results: Sequence[TestResult]):
+    by_test: dict[str, list[TestResult]] = {}
+    for r in results:
+        by_test.setdefault(r.test_id, []).append(r)
+    for rm in mapping.rows:
+        present = [t for t in rm.test_ids if t in by_test]
+        if present:
+            yield rm, present, by_test

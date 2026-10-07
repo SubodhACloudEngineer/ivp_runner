@@ -2,6 +2,7 @@
 
 import json
 import re
+import zipfile
 from pathlib import Path
 
 import openpyxl
@@ -147,6 +148,10 @@ def test_full_run_on_captured_fixtures(tmp_path, mop, capsys):
         "D61": "Issue Reported",  # two APs at 100 Mbps
     }
     assert read_cell_texts(mop, "IVP Test Plan", ["D57"]) == {"D57": "Not Started"}
+    with zipfile.ZipFile(book) as z:
+        cards = [n for n in z.namelist() if n.startswith("xl/media/ivp_runner_")]
+    assert len(cards) == 5  # one row card per mapped row, anchored in H57..H61
+    assert "5 evidence pictures" in (run_dir / "run.log").read_text()
 
     # 1 site request + 1 stats page at start, 1 stats page at end
     assert len(fake.calls) == 3

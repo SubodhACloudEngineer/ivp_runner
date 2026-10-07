@@ -202,14 +202,20 @@ def _run(cfg, outcome: RunOutcome, log, session, sleep, clock, started) -> None:
     workbook = outcome.run_dir / f"MOP_{safe_name}_{outcome.run_id}.xlsx"
     ref_hash = _sha256(cfg.mop)
     try:
-        cells = write_mop(mapping, outcome.results, catalogue, cfg.mop, workbook)
+        report = write_mop(mapping, outcome.results, catalogue, cfg.mop, workbook)
     except (PatchError, OSError) as e:
         _write_results_json(cfg, outcome, started, clock(), tz)
         raise ToolFailure(f"MOP workbook not written: {e}") from None
     if _sha256(cfg.mop) != ref_hash:  # never expected; the writer only reads src
         raise ToolFailure(f"reference workbook {cfg.mop} changed during the run")
     outcome.workbook = workbook
-    log.info("workbook %s (%d cells written)", workbook, len(cells))
+    log.info(
+        "workbook %s: %d status cells, %d evidence pictures (%s)",
+        workbook,
+        len(report.cells),
+        len(report.pictures),
+        ", ".join(f"{mapping.sheet}!{c}" for c in report.pictures),
+    )
 
     _write_results_json(cfg, outcome, started, clock(), tz)
 

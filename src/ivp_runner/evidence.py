@@ -247,6 +247,10 @@ def render_card(result: TestResult, check: Check | None) -> bytes:
     d.text((PAD, y + SECTION_GAP // 2 + 2), _ascii(footer), font=F_SMALL, fill=MUTED)
     d.rectangle([0, 0, WIDTH - 1, height - 1], outline=color, width=3)
 
+    return _to_png(img)
+
+
+def _to_png(img: Image.Image) -> bytes:
     # A site renders hundreds of cards, so speed matters. FASTOCTREE is
     # deterministic and ~5x faster than MEDIANCUT. zlib level 6 is ~6x faster
     # than 9 for ~1 KB more per card (largest observed: 32 KB, under budget).
@@ -256,6 +260,117 @@ def render_card(result: TestResult, check: Check | None) -> bytes:
     buf = io.BytesIO()
     small.save(buf, format="PNG", compress_level=6)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------- row summary card
+
+ROW_WIDTH = 620  # fits the MOP's Evidence column (~637 px) without scaling
+ROW_MAX_NAMES = 12
+F_ROW_VERDICT = _font(26)
+F_ROW_TITLE = _font(15)
+F_ROW_BODY = _font(13)
+
+
+def render_row_card(
+    test_ids: list[str], results: Iterable[TestResult], catalogue: Catalogue
+) -> bytes:
+    """One compact card summarising every device for the checks on one MOP row.
+
+    Same deterministic Pillow pipeline as ``render_card``. The per-device cards
+    stay under ``evidence/<test-id>/`` and the card says so.
+    """
+    from collections import Counter
+
+    from ivp_runner.results import rollup
+
+    by_test: dict[str, list[TestResult]] = {t: [] for t in test_ids}
+    for r in results:
+        if r.test_id in by_test:
+            by_test[r.test_id].append(r)
+    present = [t for t in test_ids if by_test[t]]
+    verdict = rollup(r.verdict for t in present for r in by_test[t])
+    color = VERDICT_COLORS[verdict]
+    checks = {c.test_id: c for c in catalogue.checks}
+    text_w = ROW_WIDTH - 2 * PAD
+    line_h = F_ROW_BODY.size + 3
+
+    # Layout pass.
+    blocks: list[tuple[str, list[tuple[str, Any, Any]], Counter]] = []
+    latest = max((r.timestamp_utc for t in present for r in by_test[t]), default=None)
+    for t in present:
+        rs = by_test[t]
+        check = checks.get(t)
+        counts = Counter(r.verdict for r in rs)
+        lines: list[tuple[str, Any, Any]] = []
+        for v in (Verdict.FAIL, Verdict.ERROR):
+            groups: dict[str, list[TestResult]] = {}
+            for r in rs:
+                if r.verdict is v:
+                    groups.setdefault(r.reason.value if r.reason else "", []).append(r)
+            for reason, members in groups.items():
+                names = [(m.device.name or m.device.id) if m.device else "site" for m in members]
+                if len(names) > ROW_MAX_NAMES and members[0].message:
+                    text = f"{v.value} {reason}: {len(names)} APs - {members[0].message}"
+                else:
+                    shown = ", ".join(names[:ROW_MAX_NAMES])
+                    more = (
+                        f" +{len(names) - ROW_MAX_NAMES} more" if len(names) > ROW_MAX_NAMES else ""
+                    )
+                    text = f"{v.value} {reason}: {shown}{more}"
+                for ln in _wrap(text, F_ROW_BODY, text_w)[:3]:
+                    lines.append((ln, VERDICT_COLORS[v], F_ROW_BODY))
+        if check is not None and check.coverage == "partial" and check.limitation:
+            first = " ".join(check.limitation.split()).split(". ")[0].rstrip(".")
+            for ln in _wrap(f"Partial check: {first}.", F_ROW_BODY, text_w)[:2]:
+                lines.append((ln, MUTED, F_ROW_BODY))
+        title = f"{t}  {check.title if check else ''}"
+        blocks.append((_wrap(title, F_ROW_TITLE, text_w)[0], lines, counts))
+
+    band_h = 44
+    height = band_h + 8
+    for _, lines, _ in blocks:
+        height += (F_ROW_TITLE.size + 4) + 12 + (line_h + 2) + len(lines) * line_h + 8
+    tz_line = ""
+    if latest:
+        r0 = next(r for t in present for r in by_test[t] if r.timestamp_utc == latest)
+        tz_line = f"{r0.timestamp_utc} UTC   {r0.timestamp_local} {r0.timezone}"
+    pointer = "Per-AP cards: " + ", ".join(f"evidence/{t}/" for t in present)
+    footer = [ln for txt in (tz_line, pointer) if txt for ln in _wrap(txt, F_SMALL, text_w)]
+    height += 4 + len(footer) * (F_SMALL.size + 3) + 8
+
+    img = Image.new("RGB", (ROW_WIDTH, height), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, ROW_WIDTH - 1, band_h - 1], fill=color)
+    d.text((PAD, 8), verdict.value, font=F_ROW_VERDICT, fill=BG)
+    note = f"{VERDICT_NOTE[verdict]}  -  {sum(len(by_test[t]) for t in present)} results"
+    d.text((PAD + 110, 16), _ascii(note), font=F_ROW_BODY, fill=BG)
+
+    y = band_h + 8
+    for title, lines, counts in blocks:
+        d.text((PAD, y), title, font=F_ROW_TITLE, fill=INK)
+        y += F_ROW_TITLE.size + 4
+        total = sum(counts.values()) or 1
+        x = PAD
+        for v in (Verdict.PASS, Verdict.FAIL, Verdict.ERROR, Verdict.SKIP):
+            if counts[v]:
+                w = max(2, round(text_w * counts[v] / total))
+                d.rectangle([x, y, min(x + w, PAD + text_w) - 1, y + 7], fill=VERDICT_COLORS[v])
+                x += w
+        y += 12
+        summary = "   ".join(f"{counts[v]} {v.value}" for v in Verdict if counts[v])
+        d.text((PAD, y), summary, font=F_ROW_BODY, fill=INK)
+        y += line_h + 2
+        for ln, c, f in lines:
+            d.text((PAD, y), ln, font=f, fill=c)
+            y += line_h
+        y += 8
+    d.line([PAD, y, ROW_WIDTH - PAD, y], fill=RULE, width=1)
+    y += 4
+    for ln in footer:
+        d.text((PAD, y), ln, font=F_SMALL, fill=MUTED)
+        y += F_SMALL.size + 3
+    d.rectangle([0, 0, ROW_WIDTH - 1, height - 1], outline=color, width=3)
+    return _to_png(img)
 
 
 def write_cards(results: Iterable[TestResult], catalogue: Catalogue) -> list[Path]:

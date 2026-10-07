@@ -2,14 +2,14 @@
 #
 # The writer refuses to write if a row's description cell does not start
 # with `expect_description`. That guards against a template whose rows have
-# moved. It also refuses to overwrite a summary cell that holds anything a
-# human wrote; it only replaces text it wrote itself.
+# moved. It also refuses if an evidence cell holds text a human wrote or a
+# picture someone else placed; it only replaces what it wrote itself.
 
 schema_version: 1
 sheet: IVP Test Plan
 description_column: B
 status_column: D
-summary_column: H
+evidence_column: H   # row summary card (PNG) is anchored here
 
 # The status column has a dropdown limited to these values.
 allowed_statuses: [Not Started, Issue Reported, In-Progress, Complete, Not Applicable]
