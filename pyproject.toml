@@ -17,6 +17,9 @@ dependencies = [
     "tzdata; sys_platform == 'win32'",
 ]
 
+[project.scripts]
+ivp = "ivp_runner.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",

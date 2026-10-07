@@ -1,0 +1,28 @@
+# Site profile template. Copy to sites/<site-id>.yaml and fill from the LLD /
+# design documents, NOT from what Mist currently reports: these are the values
+# the network is checked against. Real profiles are gitignored.
+#
+# Any value left blank (null) makes the checks that need it report ERROR
+# (expectation_missing). Nothing is ever guessed.
+
+schema_version: 1
+site_id: REPLACE-WITH-MIST-SITE-ID   # must equal --site, or the run stops (exit 3)
+site_class: large                    # small | medium | large (MOP "Site Class")
+
+expectations:
+  # AP port facing the switch. Used by AP-00, AP-04, AP-05.
+  uplink_port: eth0
+
+  # SSIDs this site must broadcast, with their bands ("24", "5", "6"). AP-01
+  # compares the number of SSIDs per band with this list.
+  #   - {ssid: Corporate, bands: ["5", "6"]}
+  ssids: null
+
+  # AP management subnet in CIDR form, e.g. 10.0.0.0/22. Used by AP-03.
+  mgmt_subnet: null
+
+  # DNS servers APs must be configured with (order ignored). Used by AP-03.
+  dns_servers: null
+
+  # Minimum acceptable uplink speed in Mbps, e.g. 1000. Used by AP-04.
+  min_uplink_speed_mbps: null

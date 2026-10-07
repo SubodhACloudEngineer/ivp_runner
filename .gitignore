@@ -5,6 +5,7 @@ samples/
 # Site profiles hold internal addressing; only the example is tracked
 sites/*
 !sites/example.yaml
+!sites/TEMPLATE.yaml
 
 # Secrets
 .env
