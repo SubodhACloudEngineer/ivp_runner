@@ -34,7 +34,27 @@ class Payload:
 
 
 class CollectError(RuntimeError):
-    """Collecting one source failed; checks using it report ERROR (api_error)."""
+    """Collecting one source failed; checks using it report ERROR (api_error).
+
+    ``kind`` classifies the failure and ``fix`` says, in network-engineer
+    terms, what to check. A ``fatal`` failure (bad token, wrong site, API
+    unreachable) would hit every other request too, so the run stops instead
+    of reporting one ERROR per device and check.
+    """
+
+    FATAL_KINDS = frozenset(
+        {"auth", "forbidden", "not_found", "bad_request", "dns", "refused", "tls", "proxy",
+         "unreachable", "not_api"}
+    )  # fmt: skip
+
+    def __init__(self, message: str, *, kind: str = "other", fix: str = ""):
+        super().__init__(message)
+        self.kind = kind
+        self.fix = fix
+
+    @property
+    def fatal(self) -> bool:
+        return self.kind in self.FATAL_KINDS
 
 
 class CollectorConfigError(RuntimeError):

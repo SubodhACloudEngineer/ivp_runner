@@ -26,9 +26,15 @@ from typing import Any, Literal
 
 import requests
 
-from ivp_runner.collectors import CollectError, Collection, Payload, normalize_token
+from ivp_runner.collectors import (
+    CollectError,
+    Collection,
+    CollectorConfigError,
+    Payload,
+    normalize_token,
+)
 
-TIMEOUT = 30
+TIMEOUT = (10, 30)  # (connect, read) seconds
 MAX_PAGES = 100
 BACKOFF_S = (1, 2, 4, 8, 16)
 REDACTED = b"<REDACTED_TOKEN>"
@@ -64,6 +70,82 @@ SOURCES: dict[str, Source] = {
 ALWAYS_AT_START = ("site",)
 
 
+def normalize_host(raw: str) -> str:
+    """``api.eu.mist.com`` from what people paste: a URL, a trailing slash."""
+    host = raw.strip()
+    for scheme in ("https://", "http://"):
+        if host.lower().startswith(scheme):
+            host = host[len(scheme) :]
+    host = host.rstrip("/")
+    if not host or "/" in host or any(c.isspace() for c in host):
+        raise CollectorConfigError(
+            f"--api-host {raw!r} is not a host name. Give the API host only, e.g. "
+            "api.mist.com (global) or api.eu.mist.com (EU)."
+        )
+    return host
+
+
+def _proxy_note() -> str:
+    # Never print the proxy URL itself: it may carry credentials.
+    set_ = any(os.environ.get(v) for v in ("HTTPS_PROXY", "https_proxy"))
+    return "HTTPS_PROXY is set in this shell" if set_ else "HTTPS_PROXY is not set in this shell"
+
+
+_DNS_MARKERS = (
+    "NameResolutionError",
+    "Failed to resolve",
+    "Name or service not known",
+    "getaddrinfo failed",
+    "nodename nor servname",
+    "Temporary failure in name resolution",
+)
+_REFUSED_MARKERS = ("Connection refused", "ConnectionRefusedError", "WinError 10061")
+
+
+def _connection_error(e: Exception, host: str, attempts: int) -> CollectError:
+    """Turn a requests exception into something a network engineer can act on."""
+    text = f"{type(e).__name__}: {e}"
+    if isinstance(e, requests.exceptions.SSLError):
+        return CollectError(
+            f"TLS certificate verification failed for {host}",
+            kind="tls",
+            fix="If this network inspects TLS (a corporate proxy or firewall), set "
+            "REQUESTS_CA_BUNDLE to your corporate CA bundle (.pem). Do not disable "
+            "certificate verification.",
+        )
+    if isinstance(e, requests.exceptions.ProxyError):
+        return CollectError(
+            f"the HTTPS proxy failed to connect to {host}",
+            kind="proxy",
+            fix=f"{_proxy_note()}. Check --api-host is spelled right (a host that does not "
+            f"exist fails at the proxy too), then the proxy address and credentials, and "
+            f"that the proxy allows {host}.",
+        )
+    if any(m in text for m in _DNS_MARKERS):
+        return CollectError(
+            f"cannot resolve {host} (DNS lookup failed)",
+            kind="dns",
+            fix=f"Check --api-host is spelled right (api.mist.com global, api.eu.mist.com EU) "
+            f"and that this machine can resolve it: nslookup {host}",
+        )
+    if any(m in text for m in _REFUSED_MARKERS):
+        port = host.rsplit(":", 1)[1] if ":" in host else "443"
+        name = host.rsplit(":", 1)[0]
+        return CollectError(
+            f"connection to {name}:{port} was refused",
+            kind="refused",
+            fix=f"Something on the path rejects HTTPS to {name}. Check firewall rules for "
+            f"outbound tcp/{port}; {_proxy_note()}.",
+        )
+    return CollectError(
+        f"no usable response from {host} after {attempts} attempts ({type(e).__name__})",
+        kind="unreachable",
+        fix=f"Check this machine has outbound HTTPS (tcp/443) to {host}: "
+        f"curl -sI https://{host}/api/v1/self should answer (401 is fine). {_proxy_note()}; "
+        "set it if your network needs a proxy.",
+    )
+
+
 def _int_header(headers: dict, name: str, default: int | None) -> int | None:
     """Case-insensitive integer header, or ``default`` if absent or not a number."""
     for k, v in headers.items():
@@ -87,7 +169,7 @@ class MistApiCollector:
         page_limit: int = 1000,
     ):
         token = normalize_token(token or os.environ.get("MIST_API_TOKEN"))
-        self._host = host
+        self._host = normalize_host(host)
         self._token = token
         self._session = session or requests.Session()
         self._sleep = sleep
@@ -122,11 +204,16 @@ class MistApiCollector:
         phase: Literal["start", "end"],
     ) -> Collection:
         out: Collection = {}
+        fatal: CollectError | None = None
         for source in self.plan(catalogue, site_class, phase):
+            if fatal is not None:  # same token, host and site: it would fail the same way
+                out[source] = fatal
+                continue
             try:
                 out[source] = self.fetch(source, site_id, run_dir, phase)
             except CollectError as e:
                 out[source] = e
+                fatal = e if e.fatal else None
         self._write_manifest(run_dir)
         return out
 
@@ -142,7 +229,7 @@ class MistApiCollector:
 
         if spec.kind == "object":
             body, data, _ = self._get_json(
-                path, dict(spec.params), raw_dir / f"{source}.{phase}.json"
+                path, dict(spec.params), raw_dir / f"{source}.{phase}.json", site_id
             )
             if not isinstance(data, dict):
                 raise CollectError(
@@ -163,7 +250,7 @@ class MistApiCollector:
         for page in range(1, MAX_PAGES + 1):
             params = {**spec.params, "limit": str(self._page_limit), "page": str(page)}
             _, data, headers = self._get_json(
-                path, params, raw_dir / f"{source}.{phase}.p{page}.json"
+                path, params, raw_dir / f"{source}.{phase}.p{page}.json", site_id
             )
             total = _int_header(headers, "X-Page-Total", total)
             if not isinstance(data, list):
@@ -205,13 +292,16 @@ class MistApiCollector:
             identity=dict(spec.identity),
         )
 
-    def _get_json(self, path: str, params: dict, save_to: Path) -> tuple[bytes, Any, dict]:
+    def _get_json(
+        self, path: str, params: dict, save_to: Path, site_id: str = ""
+    ) -> tuple[bytes, Any, dict]:
         """GET with retries; save the body verbatim (token scrubbed).
 
         Returns (raw bytes, parsed JSON, response headers).
         """
         url = f"https://{self._host}{path}"
         headers = {"Authorization": f"Token {self._token}", "Accept": "application/json"}
+        host = self._host
         for attempt in range(1, self._max_retries + 2):
             entry = {
                 "path": path,
@@ -224,10 +314,11 @@ class MistApiCollector:
                 resp = self._session.get(url, headers=headers, params=params, timeout=TIMEOUT)
             except (requests.ConnectionError, requests.Timeout) as e:
                 entry["error"] = type(e).__name__
-                if attempt > self._max_retries:
-                    raise CollectError(
-                        f"GET {path}: {type(e).__name__} after {attempt} attempts"
-                    ) from None
+                err = _connection_error(e, host, attempt)
+                # DNS, TLS, proxy and refused fail the same way every time: no retry.
+                # Timeouts and resets may be transient; retry those, but not for long.
+                if err.kind != "unreachable" or attempt > min(self._max_retries, 2):
+                    raise err from None
                 self._sleep(self._backoff(attempt, None))
                 continue
 
@@ -238,19 +329,52 @@ class MistApiCollector:
             }
             if status == 429 or status >= 500:
                 if attempt > self._max_retries:
-                    what = "rate limited (429)" if status == 429 else f"server error {status}"
-                    raise CollectError(f"GET {path}: {what} after {attempt} attempts")
+                    if status == 429:
+                        raise CollectError(
+                            f"GET {path}: rate limited (429) after {attempt} attempts",
+                            kind="rate_limited",
+                            fix="Another tool may be using the same token heavily. Wait a few "
+                            "minutes and run again.",
+                        )
+                    raise CollectError(
+                        f"GET {path}: server error {status} after {attempt} attempts",
+                        kind="server",
+                        fix="This is on the Mist side. Check the Mist status page and run "
+                        "again later.",
+                    )
                 self._sleep(self._backoff(attempt, resp.headers.get("Retry-After")))
                 continue
-            if status in (401, 403):
+            if status == 401:
                 raise CollectError(
-                    f"GET {path}: {status} authentication failed or the token lacks "
-                    "access to this site"
+                    f"Mist rejected the API token (HTTP 401 from {host})",
+                    kind="auth",
+                    fix="The token is wrong, expired or revoked, or it was created on a "
+                    "different Mist cloud: tokens only work on their own cloud (an EU org's "
+                    "token works only with --api-host api.eu.mist.com). Create a new token "
+                    "in the Mist portal and export MIST_API_TOKEN again.",
+                )
+            if status == 403:
+                raise CollectError(
+                    f"the API token cannot read site {site_id} (HTTP 403 from {host})",
+                    kind="forbidden",
+                    fix="The token is valid but has no access to this site. Check --site "
+                    "belongs to the org you expect, and that the token's account or org "
+                    "token has at least read-only (Observer) access to it.",
                 )
             if status == 404:
                 raise CollectError(
-                    f"GET {path}: 404 not found; check the site id and --api-host "
-                    "(EU orgs use api.eu.mist.com)"
+                    f"site {site_id} was not found on {host} (HTTP 404)",
+                    kind="not_found",
+                    fix="Check --site is the site's UUID as shown in the Mist portal's site "
+                    "settings. If the ID is right, the org may live on another Mist cloud: "
+                    "check --api-host (api.mist.com global, api.eu.mist.com EU).",
+                )
+            if status == 400:
+                raise CollectError(
+                    f"Mist rejected the request for site {site_id} as malformed (HTTP 400)",
+                    kind="bad_request",
+                    fix="--site is usually the cause: it must be the site's UUID, "
+                    "e.g. 0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.",
                 )
             if status >= 400:
                 raise CollectError(f"GET {path}: HTTP {status}")
@@ -262,7 +386,13 @@ class MistApiCollector:
             try:
                 return body, json.loads(body), dict(resp.headers)
             except ValueError:
-                raise CollectError(f"GET {path}: response is not JSON") from None
+                raise CollectError(
+                    f"{host} answered with something that is not JSON",
+                    kind="not_api",
+                    fix="--api-host must be the API host (api.mist.com / api.eu.mist.com), "
+                    "not the portal (manage.mist.com). A proxy login page can also cause "
+                    f"this. The response was saved to raw/{save_to.name}.",
+                ) from None
         raise AssertionError("unreachable")  # pragma: no cover
 
     @staticmethod
