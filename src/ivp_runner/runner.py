@@ -41,7 +41,7 @@ from ivp_runner.catalogue import CatalogueError, load_catalogue
 from ivp_runner.collectors import CollectError, CollectorConfigError, Payload
 from ivp_runner.collectors.mist_api import MistApiCollector
 from ivp_runner.evidence import write_cards
-from ivp_runner.mop_writer import check_template, load_mapping
+from ivp_runner.mop_writer import check_template, load_mapping, render_pictures
 from ivp_runner.mop_writer import write_results as write_mop
 from ivp_runner.results import SiteRef, TestResult, Verdict, timestamps
 from ivp_runner.site_profile import load_site_profile
@@ -122,14 +122,19 @@ def run(
     sleep: Callable[[float], None] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     stderr: Any = None,
+    on_results: Callable[[list[TestResult]], None] | None = None,
+    screenshots: Callable[[RunOutcome, Any], list] | None = None,
 ) -> RunOutcome:
+    """Run once. ``on_results`` sees the verdicts as soon as they exist (live
+    display); ``screenshots`` returns the pictures for the workbook's evidence
+    column (portal screenshots), given the outcome and the loaded mapping."""
     started = clock()
     cfg.out.mkdir(parents=True, exist_ok=True)
     run_id, run_dir = new_run_dir(cfg.out, cfg.site_id, started)
     log = _logger(run_id, run_dir / "run.log", stderr)
     outcome = RunOutcome(EXIT_TOOL, run_id, run_dir, dry_run=cfg.dry_run)
     try:
-        _run(cfg, outcome, log, session, sleep, clock, started)
+        _run(cfg, outcome, log, session, sleep, clock, started, on_results, screenshots)
     except ToolFailure as e:
         _fail(cfg, outcome, log, started, clock, e.problem, e.fix)
     except Exception as e:  # a bug: keep the traceback in run.log, not on screen
@@ -170,7 +175,9 @@ def _is_uuid(value: str) -> bool:
     return len(value) == 36
 
 
-def _run(cfg, outcome: RunOutcome, log, session, sleep, clock, started) -> None:
+def _run(
+    cfg, outcome: RunOutcome, log, session, sleep, clock, started, on_results, screenshots
+) -> None:
     log.info("ivp-runner %s run %s", __version__, outcome.run_id)
     log.info("site %s, org %s, api host %s", cfg.site_id, cfg.org_id, cfg.api_host)
 
@@ -299,10 +306,18 @@ def _run(cfg, outcome: RunOutcome, log, session, sleep, clock, started) -> None:
     outcome.results = [e.result for e in evaluations]
     outcome.exit_code = exit_code_for(outcome.results)
     log.info("evaluated %d results", len(outcome.results))
+    if on_results is not None:
+        on_results(outcome.results)
 
     # 6. Evidence: field JSON + PNG cards.
     write_evidence(evaluations)
     cards = write_cards(outcome.results, catalogue)
+    rows_dir = outcome.run_dir / "evidence" / "mop_rows"
+    rows_dir.mkdir(parents=True, exist_ok=True)
+    for card in render_pictures(mapping, outcome.results, catalogue):
+        (rows_dir / f"{card.cell}_{card.name.replace('+', '_').replace(':', '_')}.png").write_bytes(
+            card.png
+        )
     log.info("wrote %d evidence cards", len(cards))
 
     # 7. Populated MOP copy. Results and evidence are already safe on disk.
@@ -313,8 +328,9 @@ def _run(cfg, outcome: RunOutcome, log, session, sleep, clock, started) -> None:
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", site_name).strip("_") or cfg.site_id[:8]
     workbook = outcome.run_dir / f"MOP_{safe_name}_{outcome.run_id}.xlsx"
     ref_hash = _sha256(cfg.mop)
+    pictures = screenshots(outcome, mapping) if screenshots is not None else []
     try:
-        report = write_mop(mapping, outcome.results, catalogue, cfg.mop, workbook)
+        report = write_mop(mapping, outcome.results, catalogue, cfg.mop, workbook, pictures)
     except PatchError as e:
         raise ToolFailure(
             f"MOP workbook not written: {e}",

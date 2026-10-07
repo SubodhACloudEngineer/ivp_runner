@@ -115,6 +115,7 @@ from the catalogue, not from here. It is listed for reference only.
 |---|---|---|---|
 | `id` | str | always | |
 | `name` | str | always | |
+| `org_id` | str | always | Org UUID. Lets the launcher ask for the site ID only. |
 | `timezone` | str | always | IANA name. Used for site-local timestamp rendering. |
 
 ## Answerability

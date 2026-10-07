@@ -141,7 +141,8 @@ def test_full_run_on_captured_fixtures(tmp_path, mop, capsys):
     assert (run_dir / "raw" / "manifest.json").is_file()
     assert (run_dir / "raw" / "site_device_stats.start.json").is_file()
     assert (run_dir / "raw" / "site_device_stats.end.json").is_file()
-    assert len(list((run_dir / "evidence").rglob("*.png"))) == 6 * 91
+    assert len(list((run_dir / "evidence").glob("AP-*/*.png"))) == 6 * 91
+    assert len(list((run_dir / "evidence" / "mop_rows").glob("H*.png"))) == 5  # row summaries
     assert "exit code 1" in (run_dir / "run.log").read_text()
 
     (book,) = run_dir.glob("MOP_*.xlsx")
@@ -155,9 +156,9 @@ def test_full_run_on_captured_fixtures(tmp_path, mop, capsys):
     }
     assert read_cell_texts(mop, "IVP Test Plan", ["D57"]) == {"D57": "Not Started"}
     with zipfile.ZipFile(book) as z:
-        cards = [n for n in z.namelist() if n.startswith("xl/media/ivp_runner_")]
-    assert len(cards) == 5  # one row card per mapped row, anchored in H57..H61
-    assert "5 evidence pictures" in (run_dir / "run.log").read_text()
+        ours = [n for n in z.namelist() if n.startswith("xl/media/ivp_runner_")]
+    assert ours == []  # column H takes portal screenshots only; none were taken here
+    assert "0 evidence pictures" in (run_dir / "run.log").read_text()
 
     # 1 site request + 1 stats page at start, 1 stats page at end
     assert len(fake.calls) == 3
@@ -278,11 +279,6 @@ def test_token_never_written_or_printed(tmp_path, mop, capsys):
     for f in (tmp_path / "o").rglob("*"):
         if f.is_file() and f.suffix in {".json", ".log", ".yaml"}:
             assert TOKEN not in f.read_text(encoding="utf-8"), f
-
-
-def test_no_interactive_prompts_in_source():
-    for f in (ROOT / "src").rglob("*.py"):
-        assert "input(" not in f.read_text(encoding="utf-8"), f
 
 
 def test_template_profile_is_valid_once_site_id_filled(tmp_path):
@@ -473,7 +469,7 @@ def test_dry_run_evaluates_but_writes_no_workbook(tmp_path, mop, capsys):
     assert list(run_dir.glob("*.xlsx")) == [] and mop.read_bytes() == before
     doc = json.loads((run_dir / "results.json").read_text())
     assert doc["run"]["dry_run"] is True and doc["run"]["mop"]["output"] is None
-    assert len(doc["results"]) == 12 and len(list(run_dir.rglob("*.png"))) == 12
+    assert len(doc["results"]) == 12 and len(list(run_dir.glob("evidence/AP-*/*.png"))) == 12
     assert "dry run: workbook not written" in (run_dir / "run.log").read_text()
 
 

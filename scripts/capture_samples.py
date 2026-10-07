@@ -8,6 +8,10 @@ Usage:
     read -rs MIST_API_TOKEN && export MIST_API_TOKEN
     python scripts/capture_samples.py \
         --org-id <org_uuid> --site-id <site_uuid> [--api-host api.mist.com]
+
+    # Only the site-insight / SLE candidates (for the interactive launcher):
+    python scripts/capture_samples.py --insights-only \
+        --org-id <org_uuid> --site-id <site_uuid> --api-host api.eu.mist.com
 """
 
 from __future__ import annotations
@@ -45,6 +49,25 @@ def site_endpoints(org_id: str, site_id: str) -> list[tuple[str, str, dict]]:
         ("site", f"/api/v1/sites/{site_id}", {}),
         # Effective site settings (may carry AP port / power related config).
         ("site_setting_derived", f"/api/v1/sites/{site_id}/setting/derived", {}),
+    ]
+
+
+def insight_endpoints(org_id: str, site_id: str) -> list[tuple[str, str, dict]]:
+    """Candidates for "site insights" (SLEs, site-level counters).
+
+    These are guesses at where the data lives, which is the point of capturing
+    them: the launcher reads only fields seen in a successful (200) response.
+    A 404 is saved as *.error.json and simply means "not here". Client lists
+    are deliberately not captured: they hold personal data (hostnames, users).
+    """
+    sle = f"/api/v1/sites/{site_id}/sle/site/{site_id}"
+    return [
+        ("insight_site_stats", f"/api/v1/sites/{site_id}/stats", {}),
+        ("insight_sle_metrics", f"{sle}/metrics", {}),
+        ("insight_sle_coverage_summary", f"{sle}/metric/coverage/summary", {"duration": "1d"}),
+        ("insight_sle_ap_health_summary", f"{sle}/metric/ap-health/summary", {"duration": "1d"}),
+        ("insight_sle_throughput_summary", f"{sle}/metric/throughput/summary", {"duration": "1d"}),
+        ("insight_org_sites_sle", f"/api/v1/orgs/{org_id}/insights/sites-sle", {}),
     ]
 
 
@@ -105,6 +128,9 @@ def main() -> int:
     ap.add_argument("--org-id", required=True)
     ap.add_argument("--site-id", required=True)
     ap.add_argument("--api-host", default="api.mist.com")
+    ap.add_argument(
+        "--insights-only", action="store_true", help="capture only the site-insight candidates"
+    )
     args = ap.parse_args()
 
     token = clean_token(os.environ.get("MIST_API_TOKEN"))
@@ -130,6 +156,14 @@ def main() -> int:
 
 def capture(session: requests.Session, base: str, args, token: str) -> int:
     failures = 0
+    print("site insight candidates (a 404 just means the data is not there):")
+    for slug, path, params in insight_endpoints(args.org_id, args.site_id):
+        resp = get(session, base, path, params)
+        save(slug, resp, token)
+        failures += not resp.ok
+    if args.insights_only:
+        return failures
+
     stats_resp = None
     for slug, path, params in site_endpoints(args.org_id, args.site_id):
         resp = get(session, base, path, params)

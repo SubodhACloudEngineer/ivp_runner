@@ -20,7 +20,12 @@ into an Excel MOP workbook.
 - Every check module is addressable by a stable test ID (e.g. `AP-01`), which
   never changes even if the description does.
 - Timestamps are recorded in UTC with an explicit site-local rendering alongside.
-- The runner is non-interactive: no `input()` prompts anywhere in the code path.
+- Prompts live only in `src/ivp_runner/interactive.py` (guided mode: `python ivp.py`,
+  or `ivp` at a terminal with arguments missing). `ivp run` with every argument
+  given never prompts, so it stays scriptable.
+- Portal screenshots: the engineer logs in to the Mist portal by hand. The tool
+  never handles portal credentials, keeps nothing between runs, and after login
+  blocks every browser request that is not GET, HEAD or OPTIONS.
 
 ## Out of scope for now — do not build these
 Failover probe, SSH collectors, Prisma/firewall checks, Teams notifications,

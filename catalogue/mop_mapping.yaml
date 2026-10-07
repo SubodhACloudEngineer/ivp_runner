@@ -9,7 +9,8 @@ schema_version: 1
 sheet: IVP Test Plan
 description_column: B
 status_column: D
-evidence_column: H   # row summary card (PNG) is anchored here
+evidence_column: H   # portal screenshot (PNG) is anchored here
+section_column: A    # section headers, for the interactive menu
 
 # The status column has a dropdown limited to these values.
 allowed_statuses: [Not Started, Issue Reported, In-Progress, Complete, Not Applicable]
@@ -40,3 +41,15 @@ rows:
   - row: 61
     test_ids: [AP-04, AP-05]
     expect_description: Make sure the Ethernet properties
+
+# IVP Test Plan sections in sheet order, for the interactive menu. The header
+# cell must start with `title` (checked before the menu is shown). A section
+# can be run when at least one row above lies inside it; the others are
+# listed as "not available yet".
+sections:
+  - {title: Netsec Team IVP, header_row: 5}
+  - {title: Voice service IVP, header_row: 33}
+  - {title: "Verify WAN EDGE SSR's - System validation", header_row: 45}
+  - {title: "Verify WAN EDGE SSR's - Routing", header_row: 48}
+  - {title: Verify Switches, header_row: 53}
+  - {title: Verify AP, header_row: 56}

@@ -45,6 +45,11 @@ def png(color, size=(60, 40)) -> bytes:
     return b.getvalue()
 
 
+def shots():
+    """Stand-ins for portal screenshots, one per mapped row."""
+    return [Picture(f"H{r}", png("navy", (1280, 800)), f"portal:r{r}:AP-1") for r in range(57, 62)]
+
+
 @pytest.fixture
 def results():
     """AP 1 healthy; AP 2 power-constrained; AP 9 disconnected; AP-03 has no subnet."""
@@ -177,9 +182,9 @@ def test_one_row_card_per_mapped_row(results):
 # ---------------------------------------------------------------- writing
 
 
-def test_write_puts_status_in_d_and_cards_in_h(results, template, tmp_path):
+def test_write_puts_status_in_d_and_screenshots_in_h(results, template, tmp_path):
     dst = tmp_path / "out.xlsx"
-    report = write_results(load_mapping(MAPPING), results, catalogue(), template, dst)
+    report = write_results(load_mapping(MAPPING), results, catalogue(), template, dst, shots())
     assert read_cell_texts(dst, SHEET, list(report.cells)) == report.cells
     assert report.pictures == ["H57", "H58", "H59", "H60", "H61"]
 
@@ -197,7 +202,7 @@ def test_write_puts_status_in_d_and_cards_in_h(results, template, tmp_path):
 
 def test_existing_pictures_and_untouched_parts_are_preserved(results, template, tmp_path):
     dst = tmp_path / "out.xlsx"
-    write_results(load_mapping(MAPPING), results, catalogue(), template, dst)
+    write_results(load_mapping(MAPPING), results, catalogue(), template, dst, shots())
     assert theirs(pictures_in(dst)) == theirs(pictures_in(template))
     assert pictures_in(dst, "Cover Sheet") == [] or theirs(
         pictures_in(dst, "Cover Sheet")
@@ -219,8 +224,8 @@ def test_existing_pictures_and_untouched_parts_are_preserved(results, template, 
 
 def test_rerun_on_own_output_replaces_our_pictures(results, template, tmp_path):
     first, second = tmp_path / "1.xlsx", tmp_path / "2.xlsx"
-    write_results(load_mapping(MAPPING), results, catalogue(), template, first)
-    write_results(load_mapping(MAPPING), results, catalogue(), first, second)
+    write_results(load_mapping(MAPPING), results, catalogue(), template, first, shots())
+    write_results(load_mapping(MAPPING), results, catalogue(), first, second, shots())
     pics = pictures_in(second)
     assert len(ours(pics)) == 5
     assert theirs(pics) == theirs(pictures_in(template))
@@ -232,7 +237,7 @@ def test_rerun_on_own_output_replaces_our_pictures(results, template, tmp_path):
 def test_sheet_without_a_drawing_gets_one(results, tmp_path):
     src = make_template(tmp_path / "plain.xlsx", with_pictures=False)
     dst = tmp_path / "out.xlsx"
-    write_results(load_mapping(MAPPING), results, catalogue(), src, dst)
+    write_results(load_mapping(MAPPING), results, catalogue(), src, dst, shots())
     assert len(ours(pictures_in(dst))) == 5
     assert len(openpyxl.load_workbook(dst)[SHEET]._images) == 5
 
@@ -248,7 +253,7 @@ def test_refuses_foreign_picture_in_evidence_cell(results, tmp_path):
     wb.save(src)
     dst = tmp_path / "o.xlsx"
     with pytest.raises(PatchError, match="H58 already holds a picture"):
-        write_results(load_mapping(MAPPING), results, catalogue(), src, dst)
+        write_results(load_mapping(MAPPING), results, catalogue(), src, dst, shots())
     assert not dst.exists()
 
 
@@ -257,7 +262,9 @@ def test_refuses_when_template_rows_moved(results, template, tmp_path):
     wb[SHEET]["B59"] = "Something else entirely"
     wb.save(template)
     with pytest.raises(PatchError, match="B59 does not start with"):
-        write_results(load_mapping(MAPPING), results, catalogue(), template, tmp_path / "o.xlsx")
+        write_results(
+            load_mapping(MAPPING), results, catalogue(), template, tmp_path / "o.xlsx", shots()
+        )
 
 
 def test_refuses_to_overwrite_human_evidence_text(results, template, tmp_path):
@@ -265,7 +272,9 @@ def test_refuses_to_overwrite_human_evidence_text(results, template, tmp_path):
     wb[SHEET]["H60"] = "engineer notes"
     wb.save(template)
     with pytest.raises(PatchError, match="H60 already holds text a human wrote"):
-        write_results(load_mapping(MAPPING), results, catalogue(), template, tmp_path / "o.xlsx")
+        write_results(
+            load_mapping(MAPPING), results, catalogue(), template, tmp_path / "o.xlsx", shots()
+        )
 
 
 def test_non_png_picture_rejected(template, tmp_path):
@@ -279,3 +288,17 @@ def test_large_picture_is_scaled_to_fit_cell(template, tmp_path):
     (big,) = ours(pictures_in(dst))
     cx, cy = int(big["ext"].get("cx")), int(big["ext"].get("cy"))
     assert cx <= (637 - 8) * 9525 and abs(cx / cy - 2.0) < 0.01  # fits width, keeps 2:1
+
+
+def test_without_screenshots_column_h_gets_no_picture(results, template, tmp_path):
+    dst = tmp_path / "o.xlsx"
+    report = write_results(load_mapping(MAPPING), results, catalogue(), template, dst)
+    assert report.pictures == [] and ours(pictures_in(dst)) == []
+
+
+def test_picture_outside_evidence_cells_is_refused(results, template, tmp_path):
+    stray = [Picture("C57", png("red"), "x")]
+    with pytest.raises(PatchError, match="outside the evidence cells"):
+        write_results(
+            load_mapping(MAPPING), results, catalogue(), template, tmp_path / "o.xlsx", stray
+        )

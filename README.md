@@ -11,9 +11,9 @@ For one site it:
    and AP: PASS, FAIL, SKIP or ERROR;
 3. keeps the evidence: every raw API response, plus one card (PNG) per check
    and AP;
-4. fills a **copy** of the MOP workbook: the status column, and a summary
-   card per row in the evidence column. The original workbook is never
-   modified.
+4. fills a **copy** of the MOP workbook: the status column, and a Mist
+   portal screenshot per row in the evidence column (column H). The original
+   workbook is never modified.
 
 | Test ID | Checks | MOP row (IVP Test Plan) |
 |---|---|---|
@@ -47,10 +47,55 @@ it.
 ## Running it
 
 You need Python 3.11+, network access to the Mist API, and a Mist API token
-with at least read-only access to the site.
+with at least read-only access to the site. For portal screenshots you also
+need a screen for the browser window (on Windows 11, WSL provides one).
 
 ```bash
 pip install -e .
+playwright install chromium        # the browser used for portal screenshots
+```
+
+### Guided mode
+
+```bash
+python ivp.py          # or just: ivp
+```
+
+1. **Token.** If `MIST_API_TOKEN` isn't exported, it asks for the token with
+   hidden typing. The token is held in memory for this run only.
+2. **Mist cloud and site ID.** A site name or a wrong ID is explained and
+   asked again. The org is read from the site.
+3. **Site insights:** the site's name and local time, connected and
+   disconnected APs, models, PoE-constrained APs and uplink speeds.
+4. **The MOP workbook**, then a numbered menu of the sheet's IVP Test Plan
+   sections. Sections that aren't automated yet are listed as "not available
+   yet".
+5. **Running a section:**
+   - a Chromium window opens on the Mist portal and **you log in by hand**;
+   - each AP's verdict is printed per check, with the expected and actual
+     value for every FAIL and ERROR;
+   - one portal screenshot is taken per MOP row and placed in column H.
+
+**Which AP each screenshot shows:** the first AP that failed that row's
+checks, or the first that passed if none failed. Its name and the capture
+time are recorded in the picture's description.
+
+**The first time** for each row, the tool asks you to open the right page in
+the browser and press Enter. It then remembers that page's address, with the
+IDs replaced by placeholders, in `sites/portal_pages.yaml` (git-ignored).
+From then on it opens the page by itself.
+
+**Safety in the browser.** The tool never sees or submits your password.
+Nothing is saved between runs. After you log in, the browser blocks every
+request that could change something (anything but GET, HEAD and OPTIONS).
+
+### Scripted mode
+
+`ivp run` with all its arguments never prompts, so it can be scripted. At a
+terminal it asks for any argument that's missing. It writes no screenshots;
+column H is left for the guided mode.
+
+```bash
 
 # 1. Design values for the site, from the LLD (not from Mist):
 cp sites/TEMPLATE.yaml sites/<site-id>.yaml
@@ -82,6 +127,8 @@ Each run writes one folder, `out/<run-id>/`:
 | `results.json` | run header, plus one record per check and AP |
 | `raw/` | every API response, byte for byte, with `manifest.json` |
 | `evidence/<test-id>/` | one PNG card and one JSON file per AP |
+| `evidence/mop_rows/` | one summary card per MOP row |
+| `screenshots/` | the portal screenshots (guided mode) |
 | `MOP_<site>_<run-id>.xlsx` | the populated copy of the workbook |
 | `run.log` | timestamped steps |
 
@@ -195,13 +242,30 @@ judged (ERROR). `tests/test_readme.py` does this for AP-06, and
 pytest -q && ruff check . && ruff format --check .
 ```
 
+## Site insights: SLE scores
+
+The insights shown today use only API fields that have been captured and
+verified. Mist SLE scores (coverage, AP health, throughput) aren't shown yet,
+because their response format hasn't been captured, and field names are
+never guessed. To add them, run the read-only capture once and share the
+`samples/insight_*` files:
+
+```bash
+python scripts/capture_samples.py --insights-only \
+    --org-id <org-id> --site-id <site-id> --api-host api.eu.mist.com
+```
+
 ## Safety rules
 
 The full list is in `CLAUDE.md`.
 
-- **Read-only.** There is no code path that sends anything but GET.
-- **The token** comes only from `MIST_API_TOKEN`. It is never written to
-  disk, logged or printed, and it is scrubbed from saved responses.
+- **Read-only.** The API client sends nothing but GET. In the portal browser,
+  everything except GET, HEAD and OPTIONS is blocked once you've logged in.
+- **The token** comes only from `MIST_API_TOKEN`, or the guided mode's
+  hidden prompt, which keeps it in memory for that run. It is never written
+  to disk, logged or printed, and it is scrubbed from saved responses.
+- **The portal login** is done by you, in the browser. The tool never
+  handles your password.
 - **Customer data stays local.** `reference/`, `samples/`, `out/` and real
   `sites/*.yaml` files are git-ignored. Test fixtures are pseudonymised.
 - **Tests make no network calls.**

@@ -3,9 +3,10 @@
 Reads the source workbook (normally under reference/) and writes a patched
 copy (normally under out/). The source is never opened for writing.
 
-Per mapped row: the rolled-up status goes into the status column, and a row
-summary card (PNG) is anchored in the evidence column. Per-device cards stay
-in the run folder's evidence/ directory.
+Per mapped row: the rolled-up status goes into the status column, and the
+caller's picture for that row (a Mist portal screenshot) is anchored in the
+evidence column. Rows without a picture get none: summary cards stay in the
+run folder, never in the workbook.
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ class RowMap:
 
 
 @dataclass(frozen=True)
+class Section:
+    title: str
+    header_row: int
+
+
+@dataclass(frozen=True)
 class MopMapping:
     sheet: str
     description_column: str
@@ -40,6 +47,14 @@ class MopMapping:
     allowed_statuses: tuple[str, ...]
     verdict_to_status: dict[Verdict, str]
     rows: tuple[RowMap, ...]
+    section_column: str = "A"
+    sections: tuple[Section, ...] = ()
+
+    def rows_in(self, section: Section) -> tuple[RowMap, ...]:
+        """Mapped rows between this section's header and the next one."""
+        later = [s.header_row for s in self.sections if s.header_row > section.header_row]
+        end = min(later, default=10**9)
+        return tuple(r for r in self.rows if section.header_row < r.row < end)
 
 
 def load_mapping(path: str | Path) -> MopMapping:
@@ -64,6 +79,11 @@ def load_mapping(path: str | Path) -> MopMapping:
     seen = [t for r in rows for t in r.test_ids]
     if len(seen) != len(set(seen)):
         raise ValueError("mop mapping: a test ID is mapped to more than one row")
+    sections = tuple(
+        Section(str(s["title"]), int(s["header_row"])) for s in raw.get("sections") or []
+    )
+    if [s.header_row for s in sections] != sorted({s.header_row for s in sections}):
+        raise ValueError("mop mapping: sections must be in sheet order, one per header row")
     return MopMapping(
         sheet=raw["sheet"],
         description_column=raw["description_column"],
@@ -72,7 +92,36 @@ def load_mapping(path: str | Path) -> MopMapping:
         allowed_statuses=allowed,
         verdict_to_status=v2s,
         rows=rows,
+        section_column=raw.get("section_column", "A"),
+        sections=sections,
     )
+
+
+@dataclass(frozen=True)
+class MenuEntry:
+    section: Section
+    text: str  # header text as it appears in the workbook
+    rows: tuple[RowMap, ...]
+
+    @property
+    def runnable(self) -> bool:
+        return bool(self.rows)
+
+
+def read_sections(mapping: MopMapping, src: str | Path) -> list[MenuEntry]:
+    """Menu entries in sheet order; PatchError if a header has moved. Read-only."""
+    refs = [f"{mapping.section_column}{s.header_row}" for s in mapping.sections]
+    texts = read_cell_texts(src, mapping.sheet, refs)
+    entries = []
+    for s, ref in zip(mapping.sections, refs, strict=True):
+        text = " ".join(texts[ref].split())
+        if not text.startswith(s.title):
+            raise PatchError(
+                f"{mapping.sheet}!{ref} does not start with {s.title!r}; "
+                "the template layout differs from the mapping"
+            )
+        entries.append(MenuEntry(s, text, mapping.rows_in(s)))
+    return entries
 
 
 def render_cells(
@@ -89,7 +138,11 @@ def render_cells(
 def render_pictures(
     mapping: MopMapping, results: Sequence[TestResult], catalogue: Catalogue
 ) -> list[Picture]:
-    """One row summary card per mapped row, anchored in the evidence column. Pure."""
+    """One row summary card per mapped row. Pure.
+
+    The cards are saved in the run folder (evidence/mop_rows/); the workbook's
+    evidence column gets portal screenshots instead.
+    """
     pictures = []
     for rm, present, by_test in _mapped_rows(mapping, results):
         rows_results = [r for t in present for r in by_test[t]]
@@ -116,22 +169,28 @@ def write_results(
     catalogue: Catalogue,
     src: str | Path,
     dst: str | Path,
+    pictures: Sequence[Picture] = (),
 ) -> WriteReport:
     """Validate the template, then write the patched copy to ``dst``.
 
-    Status text goes into the status column; a row summary card is anchored in
-    the evidence column. Refuses (PatchError, nothing written) if a row's
-    description doesn't match the mapping, if an evidence cell holds text a
-    human wrote, or if it already holds someone else's picture.
+    Status text goes into the status column; each of ``pictures`` (normally a
+    portal screenshot per row) is anchored at its cell in the evidence column.
+    Refuses (PatchError, nothing written) if a row's description doesn't match
+    the mapping, if an evidence cell holds text a human wrote, if it already
+    holds someone else's picture, or if a picture is aimed outside the
+    evidence column of a row that has results.
     """
     cells = render_cells(mapping, results, catalogue)
     if not cells:
         raise PatchError("no mapped checks in these results; nothing to write")
+    allowed = {f"{mapping.evidence_column}{ref[len(mapping.status_column) :]}" for ref in cells}
     for ref in check_template(mapping, src):
         cells[ref] = ""  # text from an earlier ivp-runner version; the picture replaces it
 
-    pictures = render_pictures(mapping, results, catalogue)
-    patch_workbook(src, dst, mapping.sheet, cells, pictures)
+    stray = [p.cell for p in pictures if p.cell not in allowed]
+    if stray:
+        raise PatchError(f"pictures aimed outside the evidence cells of these results: {stray}")
+    patch_workbook(src, dst, mapping.sheet, cells, list(pictures))
     return WriteReport(cells=cells, pictures=[p.cell for p in pictures])
 
 
